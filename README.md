@@ -44,6 +44,18 @@ runtime. Thorlabs' proprietary SDK is not included and must be mounted into the
 container. Use the complete **.NET 8** SDK/output directory, including all DLLs
 and any `runtimes` subdirectory; do not use the `net48` build.
 
+Tagged releases are published for `linux/amd64` and `linux/arm64` at:
+
+```text
+ghcr.io/infn-epics/thorlabscct
+```
+
+For example:
+
+```sh
+docker pull ghcr.io/infn-epics/thorlabscct:0.1.0
+```
+
 Copy the example configuration and edit the two required paths/addresses:
 
 ```sh

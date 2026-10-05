@@ -1,0 +1,19 @@
+services:
+  cct10-ioc:
+    build:
+      context: .
+    image: thorlabscct10-ioc:latest
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      PREFIX: ${PREFIX:-CCT10:}
+      SERVERIP: ${SERVERIP:?Set SERVERIP to the CCT10 IPv4 address}
+      SDK_PATH: /opt/thorlabs/cct
+      EXPOSURE_MS: ${EXPOSURE_MS:-8.3}
+      AVERAGE: ${AVERAGE:-1}
+      SHUTTER: ${SHUTTER:-open}
+      CONTINUOUS: ${CONTINUOUS:-false}
+      PERIOD: ${PERIOD:-1.0}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ${CCT_SDK_HOST_PATH:?Set CCT_SDK_HOST_PATH to the CCT .NET 8 SDK directory}:/opt/thorlabs/cct:ro

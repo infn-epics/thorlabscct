@@ -1,0 +1,13 @@
+services:
+  cct10-ioc:
+    build:
+      context: .
+    image: thorlabscct10-ioc:latest
+    network_mode: host
+    environment:
+      PREFIX: ${PREFIX:-CCT10:}
+      SIMULATE: "true"
+      EXPOSURE_MS: ${EXPOSURE_MS:-8.3}
+      AVERAGE: ${AVERAGE:-1}
+      CONTINUOUS: ${CONTINUOUS:-false}
+      PERIOD: ${PERIOD:-1.0}
