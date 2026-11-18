@@ -1,0 +1,12 @@
+# Local YAML instance using the built-in simulator:
+#   thorlabscct10-ioc --config examples/simulator.yaml
+iocname: cct-sim
+iocprefix: LAB:SPEC
+simulate: true
+continuous: true
+period: 0.5
+devices:
+  - name: CCT01
+  - name: CCT02
+    exposure: 20
+    average: 4

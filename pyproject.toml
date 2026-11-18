@@ -4,24 +4,34 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "thorlabscct10-ioc"
-version = "0.1.0"
+version = "0.2.2"
 description = "EPICS Channel Access IOC for Thorlabs CCT compact spectrometers"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "caproto>=1.1.0",
   "numpy>=1.24",
+  "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
 hardware = ["pythonnet>=3.0"]
 test = ["pytest>=7"]
+# pyioc-run launcher + spec tooling (epik8s values.yaml integration)
+epik8s = ["epik8s-pyioc @ https://github.com/infn-epics/epik8s-pyioc/archive/refs/tags/v0.1.0.tar.gz"]
 
 [project.scripts]
 thorlabscct10-ioc = "thorlabscct10_ioc.ioc:main"
 
+# registers src/thorlabscct10_ioc/pyioc.yaml so `pyioc-run` finds it by devtype
+[project.entry-points."epik8s.pyioc"]
+thorlabscct = "thorlabscct10_ioc"
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+thorlabscct10_ioc = ["pyioc.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

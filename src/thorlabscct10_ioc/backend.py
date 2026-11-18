@@ -3,20 +3,44 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ipaddress
+import logging
 from pathlib import Path
 import math
 import os
+import socket
 import sys
 import time
 from typing import Protocol
 
 import numpy as np
 
+log = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class Spectrum:
     wavelength: np.ndarray
     intensity: np.ndarray
+
+
+def resolve_ipv4(address: str) -> str:
+    """Return an IPv4 literal for ``address`` (an IPv4 address or a hostname).
+
+    The Thorlabs SDK registers Ethernet devices by IP address only.
+    """
+    address = address.strip()
+    try:
+        return str(ipaddress.IPv4Address(address))
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(address, None, socket.AF_INET, socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise RuntimeError(f"cannot resolve CCT address {address!r}: {exc}") from exc
+    resolved = infos[0][4][0]
+    log.info("resolved CCT address %s -> %s", address, resolved)
+    return resolved
 
 
 class CCTBackend(Protocol):
@@ -138,7 +162,7 @@ class ThorlabsCCT:
 
         self._helper = StartupHelperCompactSpectrometer(NullLoggerFactory.Instance.CreateLogger("CCTIOC"))
         if self.ip_address:
-            self._helper.RegisterEthernetIpAddress(self.ip_address)
+            self._helper.RegisterEthernetIpAddress(resolve_ipv4(self.ip_address))
         self._helper.WithVirtual = self.virtual
         self._token = CancellationTokenSource().Token
         known = [str(key) for key in self._helper.GetKnownDevicesAsync(self._token).Result]

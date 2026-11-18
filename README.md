@@ -39,22 +39,22 @@ caput CCT10:Continuous On
 
 ## Docker deployment
 
-The container includes Python, caproto, pythonnet and the Microsoft .NET 8
-runtime. Thorlabs' proprietary SDK is not included and must be mounted into the
-container. Use the complete **.NET 8** SDK/output directory, including all DLLs
-and any `runtimes` subdirectory; do not use the `net48` build.
+The public development container includes Python, caproto, pythonnet and the
+Microsoft .NET 8 runtime. Thorlabs' proprietary SDK is not included and must be
+mounted into it. Use the complete **.NET 8** SDK/output directory, including all
+DLLs and any `runtimes` subdirectory; do not use the `net48` build.
 
-Tagged releases are published for `linux/amd64` and `linux/arm64` at:
-
-```text
-ghcr.io/infn-epics/thorlabscct
-```
-
-For example:
+The public, SDK-free image is published for every `v*` tag:
 
 ```sh
-docker pull ghcr.io/infn-epics/thorlabscct:0.1.0
+docker pull ghcr.io/infn-epics/thorlabscct:0.2.2
 ```
+
+It is the image used in production as well. The SDK is supplied at runtime:
+mount it at `/opt/thorlabs/cct` (`SDK_PATH`), or point the IOC's `sdk_path`
+parameter at a shared directory, such as an NFS share mounted in the pod (see
+[epik8s deployment](#epik8s-deployment-epik8s-pyioc)). An image that bundles
+the SDK must never be published to a public registry.
 
 Copy the example configuration and edit the two required paths/addresses:
 
@@ -112,6 +112,69 @@ Additional IOC command-line arguments may be placed after the image name and
 are appended by the entrypoint. Environment variables should be preferred for
 the options listed above.
 
+## YAML instances (epik8s `values.yaml`)
+
+The IOC can be instantiated from a YAML mapping. Its keys match an IOC entry in
+an epik8s beamline `deploy/values.yaml` (`epicsConfiguration.iocs`). It is not
+an ibek IOC: ioc-chart writes the IOC entry, merged with its `iocDefaults`, to
+`/tmp/iocconfig.yaml`, and the IOC reads it directly:
+
+```sh
+thorlabscct10-ioc --config /tmp/iocconfig.yaml      # command-line options override the file
+docker run ... -e IOC_CONFIG=/cfg/ioc.yaml -v $PWD/ioc.yaml:/cfg/ioc.yaml:ro <image>
+```
+
+| Key | Default | Meaning |
+|---|---:|---|
+| `iocprefix` | required | PV prefix. A single device uses `<iocprefix>:`; each entry in `devices` uses `<iocprefix>:<name>:` |
+| `server` / `ip` | empty | CCT Ethernet IPv4 registered with the SDK |
+| `device_id` | first found | Exact SDK connection key |
+| `exposure` | `8.3` | ms, 0.01 to 30000 |
+| `average` | `1` | 1 to 10000 |
+| `shutter` | `open` | `open` / `closed` |
+| `continuous`, `period` | `false`, `1.0` | Periodic acquisition, in seconds |
+| `simulate`, `virtual` | `false` | Built-in simulator / SDK virtual device |
+| `sdk_path` | `$SDK_PATH` or `/opt/thorlabs/cct` | SDK directory |
+| `devices` | none | List of spectrometers served by one process. Each entry takes `name` (or an explicit `prefix`), any key above, and `disable` |
+| `interfaces`, `log_level`, `log_pv_names` | `0.0.0.0`, `INFO`, `false` | IOC process settings |
+
+Top-level device keys are defaults for every `devices` entry. Other keys, such
+as chart settings, are ignored. For a local example, run
+`thorlabscct10-ioc --config examples/simulator.yaml`.
+
+### epik8s deployment (epik8s-pyioc)
+
+This IOC follows the [epik8s-pyioc](https://github.com/infn-epics/epik8s-pyioc) specification. Its
+parameters are declared in `src/thorlabscct10_ioc/pyioc.yaml`, which is
+registered as the `epik8s.pyioc` entry point `thorlabscct`. With
+`epik8s-pyioc` installed (`pip install '.[epik8s]'`), the generic `pyioc-run`
+launcher starts it from the ioc-chart config. The beamline repository needs no
+`config/iocs/...` directory.
+
+1. Add the `iocDefaults.thorlabscct` block and IOC entries from
+   `examples/epik8s/values-snippet.yaml` to the beamline `deploy/values.yaml`.
+   `pyioc defaults --devtype thorlabscct` prints the defaults block. Key it by
+   `devtype` and **do not set `template`**, which selects ioc-chart's ibek path.
+2. Check the beamline file:
+   `pyioc validate --devtype thorlabscct deploy/values.yaml`.
+3. ioc-chart must include the empty-config-directory fix (on its `main` since
+   `dfe4b80`). Beamlines with an NFS `config` mount need it.
+4. Provide the SDK. Copy the complete .NET 8 build (all DLLs and `runtimes/`)
+   to a directory the pod mounts, and set `sdk_path` in `iocDefaults`. For
+   example, with the ioc-chart NFS `config` mount at `/nfs/config`:
+
+   ```yaml
+   iocDefaults:
+     thorlabscct:
+       image: ghcr.io/infn-epics/thorlabscct:0.2.2
+       sdk_path: /nfs/config/vendor/thorlabs-cct-sdk
+   ```
+
+   The IOC loads the SDK when it starts. If the directory is missing, the IOC
+   still serves its PVs and reports the problem in `LastError`.
+
+`pyioc docs --devtype thorlabscct` prints the full parameter reference.
+
 ## Hardware setup
 
 1. Install the **CCT Series Spectrometer Software** from Thorlabs. Confirm the
@@ -150,8 +213,9 @@ enabled with `--virtual`.
 | PV suffix | Access | Meaning |
 |---|---:|---|
 | `Connected` | RO | SDK connection state |
-| `DeviceId` | RO | selected SDK connection key |
-| `LastError` | RO | most recent driver/connection error |
+| `DeviceId` | RO | selected SDK connection key (string, e.g. `CCT11-L00000220`) |
+| `LastError` | RO | most recent driver/connection error, first 39 characters (string) |
+| `LastErrorLong` | RO | full error text, up to 240 characters (char waveform: `caget -S`) |
 | `Exposure` | RW | exposure in ms, 0.01 to 30000 |
 | `Average` | RW | hardware average, 1 to 10000 frames |
 | `Shutter` | RW | `Closed` / `Open` |

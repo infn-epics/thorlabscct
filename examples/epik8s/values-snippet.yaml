@@ -1,0 +1,52 @@
+# Fragments to merge into an epik8s beamline deploy/values.yaml
+# (e.g. epik8-sparc/deploy/values.yaml).  Check with:
+#   pyioc validate --devtype thorlabscct deploy/values.yaml
+#
+# This is NOT an ibek IOC: do not set `template:` (ioc-chart would try to render
+# ibek templates that do not exist in this image).  Defaults are therefore keyed
+# by `devtype`, which epik8s-chart also uses to look up iocDefaults.
+
+iocDefaults:                 # = `pyioc defaults --devtype thorlabscct`
+  thorlabscct:
+    charturl: https://github.com/infn-epics/ioc-chart.git
+    devtype: thorlabscct
+    devgroup: diag
+    # Public image without the proprietary Thorlabs SDK; the SDK (.NET 8 build,
+    # all DLLs + runtimes/) is read from a directory mounted in the pod, here
+    # the ioc-chart NFS `config` share.
+    image: ghcr.io/infn-epics/thorlabscct:0.2.2
+    sdk_path: /nfs/config/vendor/thorlabs-cct-sdk
+    start: pyioc-run     # generic epik8s-pyioc launcher, no config/iocs/<dir> needed
+    pva: false           # caproto IOC: Channel Access only
+    asset: https://github.com/infn-epics/thorlabscct
+
+epicsConfiguration:
+  iocs:
+    # one spectrometer -> PVs SPARC:DIAG:CCT01:Spectrum, ...
+    cct01:
+      name: cct01
+      devtype: thorlabscct
+      iocprefix: SPARC:DIAG:CCT01
+      server: 192.168.0.160       # CCT Ethernet IPv4 (registered before discovery)
+      # device_id: "..."          # exact SDK key, if several devices are discovered
+      exposure: 8.3               # ms, 0.01 .. 30000
+      average: 1                  # 1 .. 10000
+      shutter: open               # open | closed
+      continuous: true
+      period: 1.0                 # s, 0.03 .. 3600
+      # simulate: true            # built-in simulator, no hardware/SDK needed
+
+    # several spectrometers in one IOC -> PVs SPARC:DIAG:SPEC:CCT02:..., SPARC:DIAG:SPEC:CCT03:...
+    # top-level keys are defaults for every device
+    cct-multi:
+      name: cct-multi
+      devtype: thorlabscct
+      iocprefix: SPARC:DIAG:SPEC
+      continuous: true
+      devices:
+        - name: CCT02
+          server: 192.168.0.161
+        - name: CCT03
+          server: 192.168.0.162
+          exposure: 20
+          average: 4

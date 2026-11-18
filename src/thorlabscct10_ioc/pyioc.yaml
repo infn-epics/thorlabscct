@@ -1,0 +1,79 @@
+pyioc: 1
+name: thorlabscct
+description: Thorlabs CCT10/CCT11/CCT12 compact CMOS spectrometers (caproto, Thorlabs .NET SDK)
+devgroup: diag
+image: ghcr.io/infn-epics/thorlabscct    # public, without the Thorlabs SDK
+version: 0.2.2
+docs: https://github.com/infn-epics/thorlabscct
+entrypoint: thorlabscct10_ioc.ioc:run_pyioc
+protocols: [ca]
+
+parameters:
+  sdk_path:
+    type: string
+    default: /opt/thorlabs/cct
+    description: Directory with the Thorlabs CCT .NET 8 assemblies and runtimes/ (not in the image; mount it, e.g. from NFS)
+  interfaces:
+    type: string
+    default: 0.0.0.0
+    description: Comma-separated IOC listen addresses
+  log_level:
+    type: enum
+    choices: [DEBUG, INFO, WARNING, ERROR]
+    default: INFO
+    aliases: [loglevel]
+  log_pv_names:
+    type: bool
+    default: false
+    description: Log every PV name at startup
+
+devices:
+  multiple: true
+  prefix: "{iocprefix}:{name}:"
+  single_prefix: "{iocprefix}:"
+  parameters:
+    server:
+      type: host
+      aliases: [ip]
+      description: CCT Ethernet IPv4 or hostname (resolved to IPv4), registered with the SDK before discovery (empty = USB/auto discovery)
+    device_id:
+      type: string
+      description: Exact SDK connection key; the first discovered device otherwise
+    simulate:
+      type: bool
+      default: false
+      description: Use the built-in CCT10 simulator (no hardware or SDK needed)
+    virtual:
+      type: bool
+      default: false
+      description: Enable the Thorlabs SDK virtual device
+    exposure:
+      type: float
+      default: 8.3
+      min: 0.01
+      max: 30000
+      unit: ms
+      aliases: [exposure_ms]
+      description: Initial exposure time
+    average:
+      type: int
+      default: 1
+      min: 1
+      max: 10000
+      description: Initial hardware average (frames)
+    shutter:
+      type: enum
+      choices: [open, closed]
+      default: open
+      description: Initial shutter state
+    continuous:
+      type: bool
+      default: false
+      description: Start continuous acquisition
+    period:
+      type: float
+      default: 1.0
+      min: 0.03
+      max: 3600
+      unit: s
+      description: Continuous acquisition request period

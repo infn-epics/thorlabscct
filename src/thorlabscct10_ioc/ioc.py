@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import time
 
 import numpy as np
@@ -12,16 +13,22 @@ from caproto import ChannelType
 from caproto.server import PVGroup, pvproperty, run
 
 from .backend import CCTBackend, SimulatedCCT, ThorlabsCCT
+from .config import DEFAULT_SDK_PATH, ConfigError, DeviceConfig, IOCConfig, load_config
 
 MAX_PIXELS = 4096
+MAX_STRING = 39  # EPICS DBR_STRING holds 40 bytes including the terminator
+MAX_ERROR = 240
 log = logging.getLogger(__name__)
 
 
 class CCTIOC(PVGroup):
     connected = pvproperty(value=0, dtype=ChannelType.ENUM, enum_strings=("Disconnected", "Connected"),
                            read_only=True, name="Connected")
-    device_id = pvproperty(value="", max_length=120, read_only=True, name="DeviceId")
-    last_error = pvproperty(value="", max_length=240, read_only=True, name="LastError")
+    # DBR_STRING (max 39 characters): readable with a plain `caget`
+    device_id = pvproperty(value="", dtype=ChannelType.STRING, read_only=True, name="DeviceId")
+    last_error = pvproperty(value="", dtype=ChannelType.STRING, read_only=True, name="LastError")
+    # full error text as a char waveform (`caget -S ...:LastErrorLong`)
+    last_error_long = pvproperty(value="", max_length=MAX_ERROR, read_only=True, name="LastErrorLong")
 
     exposure = pvproperty(value=8.3, dtype=float, name="Exposure", units="ms", precision=3,
                           lower_ctrl_limit=0.01, upper_ctrl_limit=30000.0)
@@ -73,6 +80,7 @@ class CCTIOC(PVGroup):
         self._lock: asyncio.Lock | None = None
         self._acquire_event: asyncio.Event | None = None
         self._dark_event: asyncio.Event | None = None
+        self._last_logged_error: str | None = None
         super().__init__(*args, **kwargs)
 
     @connected.startup
@@ -92,11 +100,11 @@ class CCTIOC(PVGroup):
             await asyncio.to_thread(self.backend.set_average, int(self.average.value))
             await asyncio.to_thread(self.backend.set_shutter, bool(self.shutter.value))
             await instance.write(value=1)
-            await self.device_id.write(value=self.backend.device_id)
-            await self.last_error.write(value="")
+            await self.device_id.write(value=str(self.backend.device_id)[:MAX_STRING])
+            log.info("connected to %s", self.backend.device_id)
+            await self._clear_error()
         except Exception as exc:
-            await self._record_error(exc)
-            log.exception("CCT connection failed")
+            await self._record_error(exc, "CCT connection failed")
             await asyncio.to_thread(self.backend.close)
         asyncio.create_task(self._worker())
         asyncio.create_task(self._continuous_worker())
@@ -151,7 +159,8 @@ class CCTIOC(PVGroup):
 
     async def _continuous_worker(self):
         while True:
-            if self.continuous.value and self._acquire_event is not None:
+            # no point queueing acquisitions (and errors) while disconnected
+            if self.continuous.value and self.connected.value and self._acquire_event is not None:
                 self._acquire_event.set()
             await asyncio.sleep(max(float(self.period.value), 0.03))
 
@@ -161,10 +170,9 @@ class CCTIOC(PVGroup):
             await self.busy.write(value=1)
             try:
                 await asyncio.to_thread(self.backend.acquire_dark)
-                await self.last_error.write(value="")
+                await self._clear_error()
             except Exception as exc:
-                await self._record_error(exc)
-                log.exception("dark acquisition failed")
+                await self._record_error(exc, "dark acquisition failed")
             finally:
                 await self.busy.write(value=0)
 
@@ -186,15 +194,33 @@ class CCTIOC(PVGroup):
                 if count:
                     await self.peak_wavelength.write(value=float(wavelength[peak]))
                     await self.peak_intensity.write(value=float(intensity[peak]))
-                await self.last_error.write(value="")
+                await self._clear_error()
             except Exception as exc:
-                await self._record_error(exc)
-                log.exception("spectrum acquisition failed")
+                await self._record_error(exc, "spectrum acquisition failed")
             finally:
                 await self.busy.write(value=0)
 
-    async def _record_error(self, exc: Exception):
-        await self.last_error.write(value=str(exc)[:240])
+    async def _record_error(self, exc: Exception, context: str | None = None):
+        """Publish an error; log it (with traceback) only when it differs from the last one."""
+        message = str(exc) or type(exc).__name__
+        await self.last_error.write(value=message[:MAX_STRING])
+        await self.last_error_long.write(value=message[:MAX_ERROR])
+        if context is None:
+            return
+        key = f"{context}: {message}"
+        if key != self._last_logged_error:
+            log.error("%s", context, exc_info=exc)
+            self._last_logged_error = key
+        else:
+            log.debug("%s (repeated): %s", context, message)
+
+    async def _clear_error(self):
+        if self.last_error.value or self.last_error_long.value:
+            await self.last_error.write(value="")
+            await self.last_error_long.write(value="")
+        if self._last_logged_error is not None:
+            log.info("recovered after: %s", self._last_logged_error)
+            self._last_logged_error = None
 
     async def _call_backend(self, function, *args):
         if not self.connected.value:
@@ -203,7 +229,7 @@ class CCTIOC(PVGroup):
         async with self._lock:
             try:
                 result = await asyncio.to_thread(function, *args)
-                await self.last_error.write(value="")
+                await self._clear_error()
                 return result
             except Exception as exc:
                 await self._record_error(exc)
@@ -212,69 +238,146 @@ class CCTIOC(PVGroup):
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prefix", default="CCT10:", help="EPICS PV prefix (default: %(default)s)")
-    parser.add_argument("--simulate", action="store_true", help="use the built-in CCT10 simulator")
+    parser.add_argument("--config", metavar="YAML",
+                        help="epik8s-style YAML instance file (iocprefix, server, devices, ...); "
+                             "command-line options below override it")
+    parser.add_argument("--prefix", help="EPICS PV prefix (default: CCT10:)")
+    parser.add_argument("--simulate", action="store_true", default=None,
+                        help="use the built-in CCT10 simulator")
     parser.add_argument("--sdk-path", help="directory containing the Thorlabs CCT .NET assemblies")
     parser.add_argument("--device-id", help="exact SDK connection key; defaults to first device found")
     parser.add_argument("--ip", help="register a CCT Ethernet IPv4 address before discovery")
-    parser.add_argument("--virtual", action="store_true", help="enable the Thorlabs SDK virtual device")
-    parser.add_argument("--exposure", type=float, default=8.3,
-                        help="initial exposure in ms (default: %(default)s)")
-    parser.add_argument("--average", type=int, default=1,
-                        help="initial hardware average (default: %(default)s)")
-    parser.add_argument("--shutter", choices=("open", "closed"), default="open",
-                        help="initial shutter state (default: %(default)s)")
-    parser.add_argument("--continuous", action="store_true",
+    parser.add_argument("--virtual", action="store_true", default=None,
+                        help="enable the Thorlabs SDK virtual device")
+    parser.add_argument("--exposure", type=float, help="initial exposure in ms (default: 8.3)")
+    parser.add_argument("--average", type=int, help="initial hardware average (default: 1)")
+    parser.add_argument("--shutter", choices=("open", "closed"),
+                        help="initial shutter state (default: open)")
+    parser.add_argument("--continuous", action="store_true", default=None,
                         help="start continuous spectrum acquisition")
-    parser.add_argument("--period", type=float, default=1.0,
-                        help="initial continuous acquisition period in s (default: %(default)s)")
-    parser.add_argument("--interfaces", default="0.0.0.0",
-                        help="comma-separated IOC listen addresses (default: %(default)s)")
+    parser.add_argument("--period", type=float,
+                        help="initial continuous acquisition period in s (default: 1.0)")
+    parser.add_argument("--interfaces", help="comma-separated IOC listen addresses (default: 0.0.0.0)")
     parser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"),
-                        default="INFO", help="logging verbosity (default: %(default)s)")
-    parser.add_argument("--log-pv-names", action="store_true",
+                        help="logging verbosity (default: INFO)")
+    parser.add_argument("--log-pv-names", action="store_true", default=None,
                         help="log all PV names when the IOC starts")
     parser.add_argument("--list-pvs", action="store_true", help="print PV names and exit")
     return parser
 
 
-def main(argv: list[str] | None = None) -> None:
-    args = build_arg_parser().parse_args(argv)
-    if not 0.01 <= args.exposure <= 30000.0:
-        raise SystemExit("--exposure must be in the range 0.01 .. 30000 ms")
-    if not 1 <= args.average <= 10000:
-        raise SystemExit("--average must be in the range 1 .. 10000")
-    if not 0.03 <= args.period <= 3600.0:
-        raise SystemExit("--period must be in the range 0.03 .. 3600 s")
-    interfaces = [item.strip() for item in args.interfaces.split(",") if item.strip()]
-    if not interfaces:
-        raise SystemExit("--interfaces must contain at least one address")
+def resolve_config(args: argparse.Namespace) -> IOCConfig:
+    """Combine an optional YAML file with command-line overrides."""
+    if args.config:
+        config = load_config(args.config)
+    else:
+        config = IOCConfig(devices=[DeviceConfig(prefix="CCT10:",
+                                                 sdk_path=os.environ.get("SDK_PATH", DEFAULT_SDK_PATH))])
+    if args.interfaces is not None:
+        config.interfaces = [item.strip() for item in args.interfaces.split(",") if item.strip()]
+    if args.log_level is not None:
+        config.log_level = args.log_level
+    if args.log_pv_names:
+        config.log_pv_names = True
+
+    device_overrides = {
+        "prefix": args.prefix, "ip": args.ip, "device_id": args.device_id,
+        "sdk_path": args.sdk_path, "exposure": args.exposure, "average": args.average,
+        "period": args.period, "simulate": args.simulate, "virtual": args.virtual,
+        "continuous": args.continuous,
+        "shutter_open": None if args.shutter is None else args.shutter == "open",
+    }
+    device_overrides = {key: value for key, value in device_overrides.items() if value is not None}
+    if len(config.devices) > 1:
+        for key in ("prefix", "ip", "device_id"):
+            if key in device_overrides:
+                raise ConfigError(f"--{key.replace('_', '-')} cannot be used with a multi-device configuration")
+    for device in config.devices:
+        for key, value in device_overrides.items():
+            setattr(device, key, value)
+        device.validate()
+    if not config.interfaces:
+        raise ConfigError("at least one listen interface is required")
+    return config
+
+
+def make_backend(device: DeviceConfig) -> CCTBackend:
+    if device.simulate:
+        return SimulatedCCT()
+    if not device.sdk_path:
+        raise ConfigError("an SDK path is required unless simulate is used")
+    return ThorlabsCCT(device.sdk_path, device.device_id, device.ip, device.virtual)
+
+
+def run_pyioc(instance) -> int:
+    """Entrypoint for ``pyioc-run`` (epik8s-pyioc); ``instance`` is already validated."""
+    devices = [
+        DeviceConfig(
+            prefix=device.prefix,
+            name=device.name,
+            ip=device.server,
+            device_id=device.device_id,
+            virtual=device.virtual,
+            simulate=device.simulate,
+            sdk_path=instance.sdk_path,
+            exposure=device.exposure,
+            average=device.average,
+            shutter_open=device.shutter == "open",
+            continuous=device.continuous,
+            period=device.period,
+        )
+        for device in instance.devices
+    ]
+    config = IOCConfig(
+        devices=devices,
+        interfaces=[item.strip() for item in instance.interfaces.split(",") if item.strip()],
+        log_level=instance.log_level,
+        log_pv_names=instance.log_pv_names,
+        name=instance.iocname,
+    )
+    serve(config)
+    return 0
+
+
+def serve(config: IOCConfig, list_pvs: bool = False) -> None:
     logging.basicConfig(
-        level=getattr(logging, args.log_level),
+        level=getattr(logging, config.log_level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    if args.simulate:
-        backend: CCTBackend = SimulatedCCT()
-    else:
-        if not args.sdk_path:
-            raise SystemExit("--sdk-path is required unless --simulate is used")
-        backend = ThorlabsCCT(args.sdk_path, args.device_id, args.ip, args.virtual)
-    ioc = CCTIOC(
-        prefix=args.prefix,
-        backend=backend,
-        initial_exposure=args.exposure,
-        initial_average=args.average,
-        initial_shutter_open=args.shutter == "open",
-        initial_continuous=args.continuous,
-        initial_period=args.period,
-    )
-    if args.list_pvs:
-        print("\n".join(sorted(ioc.pvdb)))
+    backends: list[CCTBackend] = []
+    pvdb: dict = {}
+    for device in config.devices:
+        backend = make_backend(device)
+        backends.append(backend)
+        ioc = CCTIOC(
+            prefix=device.prefix,
+            backend=backend,
+            initial_exposure=device.exposure,
+            initial_average=device.average,
+            initial_shutter_open=device.shutter_open,
+            initial_continuous=device.continuous,
+            initial_period=device.period,
+        )
+        pvdb.update(ioc.pvdb)
+        log.info("device %s: prefix=%s %s", device.name or "-", device.prefix,
+                 "simulated" if device.simulate else f"ip={device.ip or 'discover'}")
+    if list_pvs:
+        print("\n".join(sorted(pvdb)))
         return
     try:
-        run(ioc.pvdb, interfaces=interfaces, log_pv_names=args.log_pv_names)
+        run(pvdb, interfaces=config.interfaces, log_pv_names=config.log_pv_names)
     finally:
-        backend.close()
+        for backend in backends:
+            backend.close()
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_arg_parser().parse_args(argv)
+    try:
+        config = resolve_config(args)
+    except ConfigError as exc:
+        raise SystemExit(f"configuration error: {exc}") from exc
+    serve(config, list_pvs=args.list_pvs)
 
 
 if __name__ == "__main__":

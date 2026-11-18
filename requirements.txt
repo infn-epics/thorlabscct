@@ -1,3 +1,5 @@
 caproto>=1.1.0
 numpy>=1.24
+PyYAML>=6.0
 pythonnet>=3.0
+epik8s-pyioc @ https://github.com/infn-epics/epik8s-pyioc/archive/refs/tags/v0.1.0.tar.gz

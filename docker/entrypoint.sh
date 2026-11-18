@@ -16,6 +16,14 @@ IOC_INTERFACES="${IOC_INTERFACES:-0.0.0.0}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 LOG_PV_NAMES="${LOG_PV_NAMES:-false}"
 
+IOC_CONFIG="${IOC_CONFIG:-}"
+
+# YAML instance mode (epik8s values.yaml entry): everything comes from the file,
+# extra arguments are appended as command-line overrides.
+if [[ -n "$IOC_CONFIG" ]]; then
+    exec thorlabscct10-ioc --config "$IOC_CONFIG" "$@"
+fi
+
 is_true() {
     case "${1,,}" in
         1|true|yes|on) return 0 ;;

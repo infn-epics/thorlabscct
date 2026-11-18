@@ -23,7 +23,8 @@ RUN python3 -m venv "$VIRTUAL_ENV" \
 WORKDIR /opt/ioc
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
-RUN pip install --no-cache-dir '.[hardware]'
+RUN pip install --no-cache-dir '.[hardware,epik8s]' \
+    && pyioc check --devtype thorlabscct
 
 COPY docker/entrypoint.sh /usr/local/bin/cct10-entrypoint
 RUN chmod 0755 /usr/local/bin/cct10-entrypoint \

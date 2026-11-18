@@ -29,7 +29,7 @@ jobs:
           cache: pip
 
       - name: Install test dependencies
-        run: python -m pip install -e '.[test]'
+        run: python -m pip install -e '.[test,epik8s]'
 
       - name: Run unit tests
         run: pytest -q
@@ -43,6 +43,13 @@ jobs:
             --env SIMULATE=true \
             --env PREFIX=CI:CCT: \
             thorlabscct-ioc:ci --list-pvs | grep -Fx 'CI:CCT:Spectrum'
+
+      - name: Smoke-test YAML instance mode
+        run: |
+          docker run --rm \
+            --env IOC_CONFIG=/cfg/simulator.yaml \
+            --volume "$PWD/examples/simulator.yaml:/cfg/simulator.yaml:ro" \
+            thorlabscct-ioc:ci --list-pvs | grep -Fx 'LAB:SPEC:CCT02:Spectrum'
 
   publish:
     name: Publish tagged image
