@@ -21,14 +21,29 @@ MAX_ERROR = 240
 log = logging.getLogger(__name__)
 
 
+def padded(values: np.ndarray, length: int = MAX_PIXELS) -> np.ndarray:
+    """Pad a waveform to ``length`` elements with NaN."""
+    out = np.full(length, np.nan)
+    out[:min(values.size, length)] = values[:length]
+    return out
+
+
+def padded_text(text: str, length: int = MAX_ERROR) -> str:
+    """NUL-pad a char-waveform string to ``length`` characters."""
+    return text[:length].ljust(length, "\0")
+
+
 class CCTIOC(PVGroup):
     connected = pvproperty(value=0, dtype=ChannelType.ENUM, enum_strings=("Disconnected", "Connected"),
                            read_only=True, name="Connected")
     # DBR_STRING (max 39 characters): readable with a plain `caget`
     device_id = pvproperty(value="", dtype=ChannelType.STRING, read_only=True, name="DeviceId")
     last_error = pvproperty(value="", dtype=ChannelType.STRING, read_only=True, name="LastError")
-    # full error text as a char waveform (`caget -S ...:LastErrorLong`)
-    last_error_long = pvproperty(value="", max_length=MAX_ERROR, read_only=True, name="LastErrorLong")
+    # full error text as a char waveform (`caget -S ...:LastErrorLong`), always
+    # MAX_ERROR long (NUL padded): some CA clients (Phoebus/CAJ) cannot decode
+    # arrays shorter than their declared length
+    last_error_long = pvproperty(value="\0" * MAX_ERROR, max_length=MAX_ERROR, read_only=True,
+                                 name="LastErrorLong")
 
     exposure = pvproperty(value=8.3, dtype=float, name="Exposure", units="ms", precision=3,
                           lower_ctrl_limit=0.01, upper_ctrl_limit=30000.0)
@@ -186,8 +201,10 @@ class CCTIOC(PVGroup):
                 wavelength = result.wavelength[:count]
                 intensity = result.intensity[:count]
                 peak = int(np.argmax(intensity)) if count else 0
-                await self.wavelength.write(value=wavelength)
-                await self.spectrum.write(value=intensity)
+                # publish full-length arrays (NaN after NumPixels): Phoebus/CAJ
+                # fails to decode arrays shorter than the declared length
+                await self.wavelength.write(value=padded(wavelength))
+                await self.spectrum.write(value=padded(intensity))
                 await self.num_pixels.write(value=count)
                 await self.sequence.write(value=int(self.sequence.value) + 1)
                 await self.timestamp.write(value=time.time())
@@ -204,7 +221,7 @@ class CCTIOC(PVGroup):
         """Publish an error; log it (with traceback) only when it differs from the last one."""
         message = str(exc) or type(exc).__name__
         await self.last_error.write(value=message[:MAX_STRING])
-        await self.last_error_long.write(value=message[:MAX_ERROR])
+        await self.last_error_long.write(value=padded_text(message))
         if context is None:
             return
         key = f"{context}: {message}"
@@ -215,9 +232,9 @@ class CCTIOC(PVGroup):
             log.debug("%s (repeated): %s", context, message)
 
     async def _clear_error(self):
-        if self.last_error.value or self.last_error_long.value:
+        if self.last_error.value:
             await self.last_error.write(value="")
-            await self.last_error_long.write(value="")
+            await self.last_error_long.write(value=padded_text(""))
         if self._last_logged_error is not None:
             log.info("recovered after: %s", self._last_logged_error)
             self._last_logged_error = None

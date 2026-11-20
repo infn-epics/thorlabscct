@@ -77,7 +77,7 @@ def test_error_pvs_are_strings_and_repeated_errors_log_once(caplog):
 
     from caproto import ChannelType
 
-    from thorlabscct10_ioc.ioc import CCTIOC, MAX_STRING
+    from thorlabscct10_ioc.ioc import CCTIOC, MAX_ERROR, MAX_STRING
 
     async def scenario():
         ioc = CCTIOC(prefix="T:", backend=SimulatedCCT())
@@ -87,9 +87,11 @@ def test_error_pvs_are_strings_and_repeated_errors_log_once(caplog):
         for _ in range(5):
             await ioc._record_error(long, "spectrum acquisition failed")
         assert ioc.last_error.value == "x" * MAX_STRING
-        assert ioc.last_error_long.value == "x" * 100
+        assert ioc.last_error_long.value.rstrip("\0") == "x" * 100
+        assert len(ioc.last_error_long.value) == MAX_ERROR
         await ioc._clear_error()
-        assert ioc.last_error.value == "" and ioc.last_error_long.value == ""
+        assert ioc.last_error.value == "" and ioc.last_error_long.value.rstrip("\0") == ""
+        assert len(ioc.last_error_long.value) == MAX_ERROR
         await ioc._record_error(long, "spectrum acquisition failed")   # logged again after recovery
 
     with caplog.at_level(logging.DEBUG, logger="thorlabscct10_ioc.ioc"):
@@ -119,3 +121,21 @@ def test_continuous_does_not_queue_acquisitions_while_disconnected():
 
     disconnected, connected = asyncio.run(scenario())
     assert disconnected is False and connected is True
+
+
+def test_waveforms_are_always_full_length():
+    import asyncio
+
+    from thorlabscct10_ioc.ioc import CCTIOC, MAX_PIXELS
+
+    async def scenario():
+        ioc = CCTIOC(prefix="T:", backend=SimulatedCCT(pixels=2048))
+        ioc._lock = asyncio.Lock()
+        ioc.backend.connect()
+        await ioc._do_acquire()
+        return ioc
+
+    ioc = asyncio.run(scenario())
+    assert len(ioc.wavelength.value) == MAX_PIXELS and len(ioc.spectrum.value) == MAX_PIXELS
+    assert ioc.num_pixels.value == 2048
+    assert np.isnan(ioc.spectrum.value[2048:]).all() and not np.isnan(ioc.spectrum.value[:2048]).any()

@@ -14,11 +14,12 @@ iocDefaults:                 # = `pyioc defaults --devtype thorlabscct`
     # Public image without the proprietary Thorlabs SDK; the SDK (.NET 8 build,
     # all DLLs + runtimes/) is read from a directory mounted in the pod, here
     # the ioc-chart NFS `config` share.
-    image: ghcr.io/infn-epics/thorlabscct:0.2.2
+    image: ghcr.io/infn-epics/thorlabscct:0.2.3
     sdk_path: /nfs/config/vendor/thorlabs-cct-sdk
     start: pyioc-run     # generic epik8s-pyioc launcher, no config/iocs/<dir> needed
     pva: false           # caproto IOC: Channel Access only
     asset: https://github.com/infn-epics/thorlabscct
+    opi: thorlabscct-opi/thorlabscct.bob   # epik8s-opi, macros $(P):$(R)
 
 epicsConfiguration:
   iocs:

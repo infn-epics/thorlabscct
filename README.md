@@ -47,7 +47,7 @@ DLLs and any `runtimes` subdirectory; do not use the `net48` build.
 The public, SDK-free image is published for every `v*` tag:
 
 ```sh
-docker pull ghcr.io/infn-epics/thorlabscct:0.2.2
+docker pull ghcr.io/infn-epics/thorlabscct:0.2.3
 ```
 
 It is the image used in production as well. The SDK is supplied at runtime:
@@ -166,7 +166,7 @@ launcher starts it from the ioc-chart config. The beamline repository needs no
    ```yaml
    iocDefaults:
      thorlabscct:
-       image: ghcr.io/infn-epics/thorlabscct:0.2.2
+       image: ghcr.io/infn-epics/thorlabscct:0.2.3
        sdk_path: /nfs/config/vendor/thorlabs-cct-sdk
    ```
 
@@ -215,7 +215,7 @@ enabled with `--virtual`.
 | `Connected` | RO | SDK connection state |
 | `DeviceId` | RO | selected SDK connection key (string, e.g. `CCT11-L00000220`) |
 | `LastError` | RO | most recent driver/connection error, first 39 characters (string) |
-| `LastErrorLong` | RO | full error text, up to 240 characters (char waveform: `caget -S`) |
+| `LastErrorLong` | RO | full error text, up to 240 characters (NUL-padded char waveform: `caget -S`) |
 | `Exposure` | RW | exposure in ms, 0.01 to 30000 |
 | `Average` | RW | hardware average, 1 to 10000 frames |
 | `Shutter` | RW | `Closed` / `Open` |
@@ -232,7 +232,10 @@ enabled with `--virtual`.
 | `PeakWavelength` | RO | wavelength at maximum intensity |
 | `PeakIntensity` | RO | maximum intensity |
 
-Waveforms allow up to 4096 elements: 2048 for CCT10 and 4096 for CCT11/CCT12.
+Waveforms always carry 4096 elements; only the first `NumPixels` are valid
+(2048 for CCT10, 4096 for CCT11/CCT12) and the rest are NaN. Full-length
+arrays keep CA clients such as Phoebus able to decode them. A Phoebus screen
+is in epik8s-opi: `thorlabscct-opi/thorlabscct.bob` (macros `P`, `R`).
 Acquisition and dark capture are serialized. Driver operations run outside the
 Channel Access event loop, so even a 30-second exposure does not freeze the IOC.
 
