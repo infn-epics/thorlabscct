@@ -56,6 +56,12 @@ class DeviceConfig:
     shutter_open: bool = True
     continuous: bool = False
     period: float = 1.0
+    trigger_hardware: bool = False
+    trigger_falling: bool = False
+    trigger_single: bool = False
+    trigger_out_delay: float = 0.0
+    trigger_timeout: float = 10.0
+    sim_trigger_rate: float = 0.0
 
     def validate(self) -> None:
         where = f"device {self.name!r}" if self.name else "device"
@@ -67,6 +73,12 @@ class DeviceConfig:
             raise ConfigError(f"{where}: average must be in the range 1 .. 10000")
         if not 0.03 <= self.period <= 3600.0:
             raise ConfigError(f"{where}: period must be in the range 0.03 .. 3600 s")
+        if not -60000.0 <= self.trigger_out_delay <= 60000.0:
+            raise ConfigError(f"{where}: trigger_out_delay must be in the range -60000 .. 60000 ms")
+        if self.trigger_timeout < 0:
+            raise ConfigError(f"{where}: trigger_timeout must be >= 0 s (0 = wait forever)")
+        if self.sim_trigger_rate < 0:
+            raise ConfigError(f"{where}: sim_trigger_rate must be >= 0 Hz")
 
 
 @dataclass
@@ -125,6 +137,16 @@ def _number(value: Any, kind: type, key: str):
         raise ConfigError(f"{key}: invalid value {value!r}") from exc
 
 
+def _choice(mapping: Mapping[str, Any], key: str, choices: dict[str, bool], default: bool) -> bool:
+    value = mapping.get(key)
+    if value is None or value == "":
+        return default
+    text = str(value).strip().lower()
+    if text not in choices:
+        raise ConfigError(f"{key}: {value!r} is not one of {', '.join(choices)}")
+    return choices[text]
+
+
 def _device(merged: Mapping[str, Any], base_prefix: str, name: str) -> DeviceConfig:
     device_id = _first(merged, "device_id")
     device = DeviceConfig(
@@ -140,6 +162,16 @@ def _device(merged: Mapping[str, Any], base_prefix: str, name: str) -> DeviceCon
         shutter_open=_shutter(_first(merged, "shutter", default="open")),
         continuous=as_bool(merged.get("continuous", False), "continuous"),
         period=_number(_first(merged, "period", default=1.0), float, "period"),
+        trigger_hardware=_choice(merged, "trigger_mode", {"free": False, "hardware": True}, False),
+        trigger_falling=_choice(merged, "trigger_slope", {"rising": False, "falling": True}, False),
+        trigger_single=_choice(merged, "trigger_averaging",
+                               {"per_frame": False, "single_trigger": True}, False),
+        trigger_out_delay=_number(_first(merged, "trigger_out_delay", default=0.0), float,
+                                  "trigger_out_delay"),
+        trigger_timeout=_number(_first(merged, "trigger_timeout", default=10.0), float,
+                                "trigger_timeout"),
+        sim_trigger_rate=_number(_first(merged, "sim_trigger_rate", default=0.0), float,
+                                 "sim_trigger_rate"),
     )
     if device.ip is not None:
         device.ip = str(device.ip)
@@ -151,6 +183,8 @@ def _device(merged: Mapping[str, Any], base_prefix: str, name: str) -> DeviceCon
 _DEVICE_KEYS = (
     "server", "ip", "device_id", "virtual", "simulate", "sdk_path",
     "exposure", "exposure_ms", "average", "shutter", "continuous", "period",
+    "trigger_mode", "trigger_slope", "trigger_averaging", "trigger_out_delay", "trigger_timeout",
+    "sim_trigger_rate",
 )
 
 

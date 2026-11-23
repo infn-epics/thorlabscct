@@ -14,7 +14,7 @@ iocDefaults:                 # = `pyioc defaults --devtype thorlabscct`
     # Public image without the proprietary Thorlabs SDK; the SDK (.NET 8 build,
     # all DLLs + runtimes/) is read from a directory mounted in the pod, here
     # the ioc-chart NFS `config` share.
-    image: ghcr.io/infn-epics/thorlabscct:0.2.3
+    image: ghcr.io/infn-epics/thorlabscct:0.2.4
     sdk_path: /nfs/config/vendor/thorlabs-cct-sdk
     start: pyioc-run     # generic epik8s-pyioc launcher, no config/iocs/<dir> needed
     pva: false           # caproto IOC: Channel Access only
@@ -36,6 +36,10 @@ epicsConfiguration:
       continuous: true
       period: 1.0                 # s, 0.03 .. 3600
       # simulate: true            # built-in simulator, no hardware/SDK needed
+      # trigger_mode: hardware    # each spectrum waits for a TTL edge (free = default)
+      # trigger_slope: rising     # rising | falling
+      # trigger_timeout: 10       # s, 0 = wait forever
+      # trigger_out_delay: 0      # ms, TTL out relative to acquisition start
 
     # several spectrometers in one IOC -> PVs SPARC:DIAG:SPEC:CCT02:..., SPARC:DIAG:SPEC:CCT03:...
     # top-level keys are defaults for every device

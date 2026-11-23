@@ -12,7 +12,7 @@ import numpy as np
 from caproto import ChannelType
 from caproto.server import PVGroup, pvproperty, run
 
-from .backend import CCTBackend, SimulatedCCT, ThorlabsCCT
+from .backend import AcquisitionAborted, CCTBackend, SimulatedCCT, ThorlabsCCT, TriggerTimeout
 from .config import DEFAULT_SDK_PATH, ConfigError, DeviceConfig, IOCConfig, load_config
 
 MAX_PIXELS = 4096
@@ -26,6 +26,18 @@ def padded(values: np.ndarray, length: int = MAX_PIXELS) -> np.ndarray:
     out = np.full(length, np.nan)
     out[:min(values.size, length)] = values[:length]
     return out
+
+
+def enum_index(prop, value) -> int:
+    """Index of an enum PV value.
+
+    caproto passes enum values as strings to putters and stores them as
+    strings after a client write, but as ints when seeded with
+    ``verify_value=False``; never rely on their truthiness.
+    """
+    if isinstance(value, str):
+        return list(prop.enum_strings).index(value)
+    return int(value)
 
 
 def padded_text(text: str, length: int = MAX_ERROR) -> str:
@@ -62,6 +74,23 @@ class CCTIOC(PVGroup):
                         lower_ctrl_limit=0.03, upper_ctrl_limit=3600.0)
     busy = pvproperty(value=0, dtype=ChannelType.ENUM, enum_strings=("Idle", "Acquiring"),
                       read_only=True, name="Busy")
+    abort = pvproperty(value=0, dtype=ChannelType.ENUM, enum_strings=("Idle", "Abort"), name="Abort")
+
+    # input hardware trigger (TTL in) and output trigger (TTL out at acquisition start)
+    trigger_mode = pvproperty(value=0, dtype=ChannelType.ENUM, enum_strings=("Free running", "Hardware"),
+                              name="TriggerMode")
+    trigger_slope = pvproperty(value=0, dtype=ChannelType.ENUM, enum_strings=("Rising", "Falling"),
+                               name="TriggerSlope")
+    trigger_averaging = pvproperty(value=0, dtype=ChannelType.ENUM,
+                                   enum_strings=("Per frame", "Single trigger"), name="TriggerAveraging")
+    trigger_out_delay = pvproperty(value=0.0, dtype=float, name="TriggerOutDelay", units="ms", precision=3,
+                                   lower_ctrl_limit=-60000.0, upper_ctrl_limit=60000.0)
+    trigger_timeout = pvproperty(value=10.0, dtype=float, name="TriggerTimeout", units="s", precision=1,
+                                 lower_ctrl_limit=0.0, upper_ctrl_limit=86400.0)
+    trigger_armed = pvproperty(value=0, dtype=ChannelType.ENUM, enum_strings=("Idle", "Waiting for trigger"),
+                               read_only=True, name="TriggerArmed")
+    triggered = pvproperty(value=0, dtype=ChannelType.ENUM, enum_strings=("No", "Yes"), read_only=True,
+                           name="Triggered")
 
     wavelength = pvproperty(value=np.zeros(MAX_PIXELS), dtype=float, max_length=MAX_PIXELS,
                             read_only=True, name="Wavelength", units="nm", precision=4)
@@ -84,6 +113,11 @@ class CCTIOC(PVGroup):
         initial_shutter_open: bool = True,
         initial_continuous: bool = False,
         initial_period: float = 1.0,
+        initial_trigger_hardware: bool = False,
+        initial_trigger_falling: bool = False,
+        initial_trigger_single: bool = False,
+        initial_trigger_out_delay: float = 0.0,
+        initial_trigger_timeout: float = 10.0,
         **kwargs,
     ):
         self.backend = backend
@@ -92,6 +126,10 @@ class CCTIOC(PVGroup):
         self.initial_shutter_open = initial_shutter_open
         self.initial_continuous = initial_continuous
         self.initial_period = initial_period
+        self.initial_trigger = (bool(initial_trigger_hardware), bool(initial_trigger_single),
+                                bool(initial_trigger_falling))
+        self.initial_trigger_out_delay = float(initial_trigger_out_delay)
+        self.initial_trigger_timeout = float(initial_trigger_timeout)
         self._lock: asyncio.Lock | None = None
         self._acquire_event: asyncio.Event | None = None
         self._dark_event: asyncio.Event | None = None
@@ -109,11 +147,17 @@ class CCTIOC(PVGroup):
         await self.shutter.write(value=int(self.initial_shutter_open), verify_value=False)
         await self.continuous.write(value=int(self.initial_continuous), verify_value=False)
         await self.period.write(value=self.initial_period, verify_value=False)
+        hardware, single, falling = self.initial_trigger
+        await self.trigger_mode.write(value=int(hardware), verify_value=False)
+        await self.trigger_averaging.write(value=int(single), verify_value=False)
+        await self.trigger_slope.write(value=int(falling), verify_value=False)
+        await self.trigger_out_delay.write(value=self.initial_trigger_out_delay, verify_value=False)
+        await self.trigger_timeout.write(value=self.initial_trigger_timeout, verify_value=False)
         try:
             await asyncio.to_thread(self.backend.connect)
             await asyncio.to_thread(self.backend.set_exposure, float(self.exposure.value))
             await asyncio.to_thread(self.backend.set_average, int(self.average.value))
-            await asyncio.to_thread(self.backend.set_shutter, bool(self.shutter.value))
+            await asyncio.to_thread(self.backend.set_shutter, self._enum(self.shutter) == 1)
             await instance.write(value=1)
             await self.device_id.write(value=str(self.backend.device_id)[:MAX_STRING])
             log.info("connected to %s", self.backend.device_id)
@@ -121,6 +165,8 @@ class CCTIOC(PVGroup):
         except Exception as exc:
             await self._record_error(exc, "CCT connection failed")
             await asyncio.to_thread(self.backend.close)
+        else:
+            await self._apply_trigger_config()
         asyncio.create_task(self._worker())
         asyncio.create_task(self._continuous_worker())
 
@@ -140,20 +186,99 @@ class CCTIOC(PVGroup):
 
     @shutter.putter
     async def shutter(self, instance, value):
-        await self._call_backend(self.backend.set_shutter, bool(value))
+        await self._call_backend(self.backend.set_shutter, enum_index(instance, value) == 1)
         return value
 
     @acquire.putter
     async def acquire(self, instance, value):
-        if value and self._acquire_event is not None:
+        if enum_index(instance, value) == 1 and self._acquire_event is not None:
             self._acquire_event.set()
         return 0
 
     @acquire_dark.putter
     async def acquire_dark(self, instance, value):
-        if value and self._dark_event is not None:
+        if enum_index(instance, value) == 1 and self._dark_event is not None:
             self._dark_event.set()
         return 0
+
+    @abort.putter
+    async def abort(self, instance, value):
+        if enum_index(instance, value) == 1:
+            if self._acquire_event is not None:
+                self._acquire_event.clear()
+            await asyncio.to_thread(self.backend.abort)
+        return 0
+
+    @trigger_mode.putter
+    async def trigger_mode(self, instance, value):
+        await self._call_backend(self.backend.set_input_trigger,
+                                 *self._trigger_settings(mode=enum_index(instance, value)))
+        return value
+
+    @trigger_averaging.putter
+    async def trigger_averaging(self, instance, value):
+        await self._call_backend(self.backend.set_input_trigger,
+                                 *self._trigger_settings(averaging=enum_index(instance, value)))
+        return value
+
+    @trigger_slope.putter
+    async def trigger_slope(self, instance, value):
+        await self._call_backend(self.backend.set_input_trigger,
+                                 *self._trigger_settings(slope=enum_index(instance, value)))
+        return value
+
+    @trigger_out_delay.putter
+    async def trigger_out_delay(self, instance, value):
+        if not -60000.0 <= value <= 60000.0:
+            raise ValueError("TriggerOutDelay must be -60000 .. 60000 ms")
+        await self._call_backend(self.backend.set_output_trigger_delay, float(value))
+        return value
+
+    @trigger_timeout.putter
+    async def trigger_timeout(self, instance, value):
+        if value < 0:
+            raise ValueError("TriggerTimeout must be >= 0 s (0 = wait forever)")
+        return value
+
+    async def _apply_trigger_config(self):
+        """Apply the configured trigger settings; never fatal for the connection.
+
+        Not every device/driver implements triggering (the SDK virtual device
+        raises NotImplementedException): then the IOC keeps working free running
+        and reports the problem only if triggering was actually requested.
+        """
+        delay = float(self.trigger_out_delay.value)
+        for label, function, args, requested in (
+                ("input hardware trigger", self.backend.set_input_trigger, self._trigger_settings(),
+                 self._hardware_trigger),
+                ("output trigger delay", self.backend.set_output_trigger_delay, (delay,),
+                 delay != 0.0)):
+            try:
+                await asyncio.to_thread(function, *args)
+            except Exception as exc:
+                message = f"{label} not available: {str(exc) or type(exc).__name__}"
+                if requested:
+                    await self._record_error(RuntimeError(message), "trigger setup")
+                else:
+                    log.warning("%s (free running only)", message)
+        if self._hardware_trigger and self.last_error.value:
+            # do not leave the IOC believing it is armed for triggers it will never get
+            await self.trigger_mode.write(value=0, verify_value=False)
+
+    @staticmethod
+    def _enum(prop) -> int:
+        return enum_index(prop, prop.value)
+
+    def _trigger_settings(self, mode=None, averaging=None, slope=None):
+        """(enabled, single-trigger averaging, falling edge) with optional overrides."""
+        mode = self._enum(self.trigger_mode) if mode is None else mode
+        averaging = self._enum(self.trigger_averaging) if averaging is None else averaging
+        slope = self._enum(self.trigger_slope) if slope is None else slope
+        return mode == 1, averaging == 1, slope == 1
+
+    @property
+    def _hardware_trigger(self) -> bool:
+        return self._enum(self.trigger_mode) == 1
 
     async def _worker(self):
         assert self._acquire_event is not None and self._dark_event is not None
@@ -175,9 +300,15 @@ class CCTIOC(PVGroup):
     async def _continuous_worker(self):
         while True:
             # no point queueing acquisitions (and errors) while disconnected
-            if self.continuous.value and self.connected.value and self._acquire_event is not None:
+            running = (self._enum(self.continuous) == 1 and self._enum(self.connected) == 1
+                       and self._acquire_event is not None)
+            if running:
                 self._acquire_event.set()
-            await asyncio.sleep(max(float(self.period.value), 0.03))
+            if running and self._hardware_trigger:
+                # re-arm right after each spectrum: the trigger sets the pace
+                await asyncio.sleep(0.01)
+            else:
+                await asyncio.sleep(max(float(self.period.value), 0.03))
 
     async def _do_dark(self):
         assert self._lock is not None
@@ -195,8 +326,12 @@ class CCTIOC(PVGroup):
         assert self._lock is not None
         async with self._lock:
             await self.busy.write(value=1)
+            hardware = self._hardware_trigger
+            timeout = float(self.trigger_timeout.value) or None
             try:
-                result = await asyncio.to_thread(self.backend.acquire)
+                if hardware:
+                    await self.trigger_armed.write(value=1)
+                result = await asyncio.to_thread(self.backend.acquire, timeout)
                 count = min(result.wavelength.size, result.intensity.size, MAX_PIXELS)
                 wavelength = result.wavelength[:count]
                 intensity = result.intensity[:count]
@@ -211,10 +346,21 @@ class CCTIOC(PVGroup):
                 if count:
                     await self.peak_wavelength.write(value=float(wavelength[peak]))
                     await self.peak_intensity.write(value=float(intensity[peak]))
+                await self.triggered.write(value=int(bool(result.triggered)))
                 await self._clear_error()
+            except AcquisitionAborted:
+                log.info("acquisition aborted")
+            except TriggerTimeout as exc:
+                # no beam/trigger during continuous acquisition is normal: just re-arm
+                if self._enum(self.continuous) == 1:
+                    log.debug("%s; re-arming", exc)
+                else:
+                    await self._record_error(exc, "triggered acquisition")
             except Exception as exc:
                 await self._record_error(exc, "spectrum acquisition failed")
             finally:
+                if hardware:
+                    await self.trigger_armed.write(value=0)
                 await self.busy.write(value=0)
 
     async def _record_error(self, exc: Exception, context: str | None = None):
@@ -240,9 +386,13 @@ class CCTIOC(PVGroup):
             self._last_logged_error = None
 
     async def _call_backend(self, function, *args):
-        if not self.connected.value:
+        if self._enum(self.connected) != 1:
             raise RuntimeError("spectrometer is not connected")
         assert self._lock is not None
+        if self._enum(self.trigger_armed) == 1:
+            # a setting change must not wait for the next trigger: cancel the armed
+            # acquisition (continuous mode re-arms with the new setting)
+            await asyncio.to_thread(self.backend.abort)
         async with self._lock:
             try:
                 result = await asyncio.to_thread(function, *args)
@@ -274,6 +424,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="start continuous spectrum acquisition")
     parser.add_argument("--period", type=float,
                         help="initial continuous acquisition period in s (default: 1.0)")
+    parser.add_argument("--trigger-mode", choices=("free", "hardware"),
+                        help="input hardware trigger: free running or hardware (default: free)")
+    parser.add_argument("--trigger-slope", choices=("rising", "falling"),
+                        help="TTL edge that triggers an acquisition (default: rising)")
+    parser.add_argument("--trigger-averaging", choices=("per_frame", "single_trigger"),
+                        help="hardware averaging in trigger mode (default: per_frame)")
+    parser.add_argument("--trigger-out-delay", type=float,
+                        help="output trigger delay in ms, negative = before acquisition (default: 0)")
+    parser.add_argument("--trigger-timeout", type=float,
+                        help="max wait for an input trigger in s, 0 = forever (default: 10)")
+    parser.add_argument("--sim-trigger-rate", type=float,
+                        help="simulator only: internal trigger pulses per second (default: 0)")
     parser.add_argument("--interfaces", help="comma-separated IOC listen addresses (default: 0.0.0.0)")
     parser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"),
                         help="logging verbosity (default: INFO)")
@@ -302,6 +464,12 @@ def resolve_config(args: argparse.Namespace) -> IOCConfig:
         "sdk_path": args.sdk_path, "exposure": args.exposure, "average": args.average,
         "period": args.period, "simulate": args.simulate, "virtual": args.virtual,
         "continuous": args.continuous,
+        "trigger_hardware": None if args.trigger_mode is None else args.trigger_mode == "hardware",
+        "trigger_falling": None if args.trigger_slope is None else args.trigger_slope == "falling",
+        "trigger_single": (None if args.trigger_averaging is None
+                           else args.trigger_averaging == "single_trigger"),
+        "trigger_out_delay": args.trigger_out_delay, "trigger_timeout": args.trigger_timeout,
+        "sim_trigger_rate": args.sim_trigger_rate,
         "shutter_open": None if args.shutter is None else args.shutter == "open",
     }
     device_overrides = {key: value for key, value in device_overrides.items() if value is not None}
@@ -320,7 +488,7 @@ def resolve_config(args: argparse.Namespace) -> IOCConfig:
 
 def make_backend(device: DeviceConfig) -> CCTBackend:
     if device.simulate:
-        return SimulatedCCT()
+        return SimulatedCCT(trigger_rate=device.sim_trigger_rate)
     if not device.sdk_path:
         raise ConfigError("an SDK path is required unless simulate is used")
     return ThorlabsCCT(device.sdk_path, device.device_id, device.ip, device.virtual)
@@ -342,6 +510,12 @@ def run_pyioc(instance) -> int:
             shutter_open=device.shutter == "open",
             continuous=device.continuous,
             period=device.period,
+            trigger_hardware=device.trigger_mode == "hardware",
+            trigger_falling=device.trigger_slope == "falling",
+            trigger_single=device.trigger_averaging == "single_trigger",
+            trigger_out_delay=device.trigger_out_delay,
+            trigger_timeout=device.trigger_timeout,
+            sim_trigger_rate=device.sim_trigger_rate,
         )
         for device in instance.devices
     ]
@@ -374,6 +548,11 @@ def serve(config: IOCConfig, list_pvs: bool = False) -> None:
             initial_shutter_open=device.shutter_open,
             initial_continuous=device.continuous,
             initial_period=device.period,
+            initial_trigger_hardware=device.trigger_hardware,
+            initial_trigger_falling=device.trigger_falling,
+            initial_trigger_single=device.trigger_single,
+            initial_trigger_out_delay=device.trigger_out_delay,
+            initial_trigger_timeout=device.trigger_timeout,
         )
         pvdb.update(ioc.pvdb)
         log.info("device %s: prefix=%s %s", device.name or "-", device.prefix,

@@ -3,7 +3,7 @@ name: thorlabscct
 description: Thorlabs CCT10/CCT11/CCT12 compact CMOS spectrometers (caproto, Thorlabs .NET SDK)
 devgroup: diag
 image: ghcr.io/infn-epics/thorlabscct    # public, without the Thorlabs SDK
-version: 0.2.3
+version: 0.2.4
 docs: https://github.com/infn-epics/thorlabscct
 entrypoint: thorlabscct10_ioc.ioc:run_pyioc
 protocols: [ca]
@@ -77,3 +77,37 @@ devices:
       max: 3600
       unit: s
       description: Continuous acquisition request period
+    trigger_mode:
+      type: enum
+      choices: [free, hardware]
+      default: free
+      description: Input hardware trigger. free = free running; hardware = each spectrum waits for a TTL edge
+    trigger_slope:
+      type: enum
+      choices: [rising, falling]
+      default: rising
+      description: TTL edge that starts an acquisition in hardware trigger mode
+    trigger_averaging:
+      type: enum
+      choices: [per_frame, single_trigger]
+      default: per_frame
+      description: With average > 1 in hardware mode, one trigger per averaged frame, or all frames on a single trigger
+    trigger_out_delay:
+      type: float
+      default: 0.0
+      min: -60000
+      max: 60000
+      unit: ms
+      description: Output trigger (TTL out) delay from acquisition start; negative = pulse before the acquisition
+    trigger_timeout:
+      type: float
+      default: 10.0
+      min: 0
+      unit: s
+      description: Max wait for an input trigger (0 = forever). In continuous mode a timeout just re-arms
+    sim_trigger_rate:
+      type: float
+      default: 0.0
+      min: 0
+      unit: Hz
+      description: Simulator only, internal trigger pulse rate (0 = no pulses)

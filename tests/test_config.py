@@ -145,3 +145,31 @@ def test_run_pyioc_entrypoint(monkeypatch):
     assert [d.prefix for d in config.devices] == ["SPARC:DIAG:SPEC:CCT01:", "SPARC:DIAG:SPEC:CCT02:"]
     assert config.devices[0].ip == "10.0.0.1" and config.devices[1].exposure == 20.0
     assert all(d.simulate and not d.shutter_open for d in config.devices)
+
+
+def test_trigger_settings_from_yaml_and_spec():
+    config = parse_config({"iocprefix": "X", "trigger_mode": "hardware", "trigger_slope": "Falling",
+                           "trigger_averaging": "single_trigger", "trigger_out_delay": "-5",
+                           "trigger_timeout": 0})
+    (device,) = config.devices
+    assert device.trigger_hardware and device.trigger_falling and device.trigger_single
+    assert device.trigger_out_delay == -5.0 and device.trigger_timeout == 0.0
+    with pytest.raises(ConfigError):
+        parse_config({"iocprefix": "X", "trigger_mode": "sometimes"})
+
+    pyioc, spec = _pyioc_spec()
+    from thorlabscct10_ioc import ioc as ioc_module
+
+    captured = {}
+    import pytest as _pytest  # noqa: F401
+    instance = pyioc.resolve_instance(spec, {"iocprefix": "X", "trigger_mode": "hardware",
+                                             "trigger_slope": "falling", "sim_trigger_rate": 5})
+    original = ioc_module.serve
+    ioc_module.serve = lambda config, list_pvs=False: captured.update(config=config)
+    try:
+        ioc_module.run_pyioc(instance)
+    finally:
+        ioc_module.serve = original
+    (device,) = captured["config"].devices
+    assert device.trigger_hardware and device.trigger_falling and not device.trigger_single
+    assert device.sim_trigger_rate == 5.0

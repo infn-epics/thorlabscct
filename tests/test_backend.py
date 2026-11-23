@@ -139,3 +139,78 @@ def test_waveforms_are_always_full_length():
     assert len(ioc.wavelength.value) == MAX_PIXELS and len(ioc.spectrum.value) == MAX_PIXELS
     assert ioc.num_pixels.value == 2048
     assert np.isnan(ioc.spectrum.value[2048:]).all() and not np.isnan(ioc.spectrum.value[:2048]).any()
+
+
+def test_simulated_hardware_trigger_waits_times_out_and_aborts():
+    import threading
+    import time
+
+    from thorlabscct10_ioc.backend import AcquisitionAborted, TriggerTimeout
+
+    cct = SimulatedCCT()
+    cct.connect()
+    cct.set_input_trigger(True, False, False)
+    started = time.monotonic()
+    with pytest.raises(TriggerTimeout):
+        cct.acquire(timeout=0.2)
+    assert 0.15 < time.monotonic() - started < 1.0
+
+    threading.Timer(0.1, cct.fire_trigger).start()
+    assert cct.acquire(timeout=2).triggered is True
+
+    threading.Timer(0.1, cct.abort).start()
+    with pytest.raises(AcquisitionAborted):
+        cct.acquire(timeout=0)          # 0 = wait forever, ended only by abort
+
+
+def test_simulated_per_frame_averaging_needs_one_edge_per_frame():
+    import threading
+
+    from thorlabscct10_ioc.backend import TriggerTimeout
+
+    cct = SimulatedCCT()
+    cct.connect()
+    cct.set_average(3)
+    cct.set_input_trigger(True, False, False)          # per frame
+    for delay in (0.05, 0.1):
+        threading.Timer(delay, cct.fire_trigger).start()
+    with pytest.raises(TriggerTimeout):                 # only 2 of 3 edges
+        cct.acquire(timeout=0.4)
+    cct.set_input_trigger(True, True, False)            # single trigger
+    threading.Timer(0.05, cct.fire_trigger).start()
+    assert cct.acquire(timeout=2).triggered
+
+
+def test_free_running_spectrum_is_not_triggered():
+    cct = SimulatedCCT()
+    cct.connect()
+    assert cct.acquire().triggered is False
+
+
+def test_devices_without_trigger_support_stay_connected(caplog):
+    import asyncio
+    import logging
+
+    from thorlabscct10_ioc.ioc import CCTIOC
+
+    class NoTrigger(SimulatedCCT):
+        def set_input_trigger(self, *args):
+            raise NotImplementedError("The method or operation is not implemented.")
+
+        def set_output_trigger_delay(self, milliseconds):
+            raise NotImplementedError("The method or operation is not implemented.")
+
+    async def scenario(**initial):
+        ioc = CCTIOC(prefix="T:", backend=NoTrigger(), **initial)
+        await CCTIOC.connected.pvspec.startup(ioc, ioc.connected, None)
+        return ioc
+
+    with caplog.at_level(logging.WARNING, logger="thorlabscct10_ioc.ioc"):
+        ioc = asyncio.run(scenario())                    # free running: only a warning
+    assert ioc.connected.value in (1, "Connected") and ioc.last_error.value == ""
+    assert any("free running only" in r.getMessage() for r in caplog.records)
+
+    ioc = asyncio.run(scenario(initial_trigger_hardware=True))   # requested: reported
+    assert ioc.connected.value in (1, "Connected")
+    assert "trigger not available" in ioc.last_error.value
+    assert ioc.trigger_mode.value in (0, "Free running")

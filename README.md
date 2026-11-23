@@ -47,7 +47,7 @@ DLLs and any `runtimes` subdirectory; do not use the `net48` build.
 The public, SDK-free image is published for every `v*` tag:
 
 ```sh
-docker pull ghcr.io/infn-epics/thorlabscct:0.2.3
+docker pull ghcr.io/infn-epics/thorlabscct:0.2.4
 ```
 
 It is the image used in production as well. The SDK is supplied at runtime:
@@ -166,7 +166,7 @@ launcher starts it from the ioc-chart config. The beamline repository needs no
    ```yaml
    iocDefaults:
      thorlabscct:
-       image: ghcr.io/infn-epics/thorlabscct:0.2.3
+       image: ghcr.io/infn-epics/thorlabscct:0.2.4
        sdk_path: /nfs/config/vendor/thorlabs-cct-sdk
    ```
 
@@ -224,6 +224,14 @@ enabled with `--virtual`.
 | `Continuous` | RW | periodic acquisition enable |
 | `Period` | RW | continuous request period in seconds |
 | `Busy` | RO | acquisition in progress |
+| `Abort` | WO-like | write `Abort` to cancel a pending acquisition (e.g. waiting for a trigger) |
+| `TriggerMode` | RW | `Free running` / `Hardware` (each spectrum waits for a TTL edge on the trigger input) |
+| `TriggerSlope` | RW | `Rising` / `Falling` edge |
+| `TriggerAveraging` | RW | with `Average` > 1: `Per frame` (one edge per averaged frame) / `Single trigger` |
+| `TriggerOutDelay` | RW | output trigger (TTL out) delay from acquisition start in ms; negative = before |
+| `TriggerTimeout` | RW | max wait for an input trigger in s; 0 = forever |
+| `TriggerArmed` | RO | `Idle` / `Waiting for trigger` |
+| `Triggered` | RO | whether the last spectrum was started by the input trigger |
 | `Wavelength` | RO | wavelength axis in nm (waveform) |
 | `Spectrum` | RO | intensity in counts (waveform) |
 | `NumPixels` | RO | valid elements in both waveforms |
@@ -238,6 +246,27 @@ arrays keep CA clients such as Phoebus able to decode them. A Phoebus screen
 is in epik8s-opi: `thorlabscct-opi/thorlabscct.bob` (macros `P`, `R`).
 Acquisition and dark capture are serialized. Driver operations run outside the
 Channel Access event loop, so even a 30-second exposure does not freeze the IOC.
+
+### Hardware trigger
+
+With `TriggerMode = Hardware` every acquisition waits for the input trigger:
+
+- `Acquire` arms one acquisition (`TriggerArmed = Waiting for trigger`). Without
+  a trigger within `TriggerTimeout` it ends with an error in `LastError`.
+- With `Continuous = On` the IOC re-arms right after each spectrum, so the
+  trigger sets the pace (`Period` is not used). A timeout here just re-arms.
+- Changing any setting while armed cancels the wait, applies the setting and
+  (in continuous mode) re-arms. `Abort` cancels the wait.
+- `AcquireDark` takes the dark reference free running (shutter closed), then
+  restores the trigger mode.
+- The output trigger (TTL out) pulses at every acquisition start, shifted by
+  `TriggerOutDelay`.
+
+The same settings can be given in `values.yaml` (`trigger_mode: hardware`,
+`trigger_slope`, `trigger_averaging`, `trigger_out_delay`, `trigger_timeout`).
+Devices whose driver does not implement triggering (e.g. the SDK virtual
+device) keep working free running; trigger writes then fail with the driver's
+message.
 
 ## Development
 
