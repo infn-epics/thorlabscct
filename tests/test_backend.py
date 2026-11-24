@@ -214,3 +214,49 @@ def test_devices_without_trigger_support_stay_connected(caplog):
     assert ioc.connected.value in (1, "Connected")
     assert "trigger not available" in ioc.last_error.value
     assert ioc.trigger_mode.value in (0, "Free running")
+
+
+def test_supervisor_reconnects_and_restores_settings(monkeypatch):
+    import asyncio
+
+    from thorlabscct10_ioc.ioc import CCTIOC
+
+    class Flaky(SimulatedCCT):
+        """Refuses the first connection (a session the killed process still holds), then works."""
+
+        def __init__(self):
+            super().__init__()
+            self.attempts = 0
+            self.trigger_calls = []
+
+        def connect(self):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("no CCT spectrometer was discovered")
+            super().connect()
+
+        def set_input_trigger(self, *args):
+            self.trigger_calls.append(args)
+            super().set_input_trigger(*args)
+
+    monkeypatch.setattr(CCTIOC, "RECONNECT_PERIOD", 0.05)
+
+    async def scenario():
+        backend = Flaky()
+        ioc = CCTIOC(prefix="T:", backend=backend)
+        await CCTIOC.connected.pvspec.startup(ioc, ioc.connected, None)
+        assert ioc.connected.value in (0, "Disconnected") and "discovered" in ioc.last_error.value
+        await ioc.trigger_mode.write(value=1, verify_value=False)      # an operator chose Hardware meanwhile
+        await asyncio.sleep(0.3)
+        assert ioc.connected.value in (1, "Connected") and ioc.last_error.value == ""
+        assert backend.trigger_calls[-1][0] is True                     # restored on reconnect
+        assert ioc.memory_used.value > 0
+        # the device stops answering: after MAX_FAILURES acquisitions, reconnect
+        ioc._failures = ioc.MAX_FAILURES
+        before = backend.attempts
+        await asyncio.sleep(0.3)
+        assert backend.attempts == before + 1 and ioc._failures == 0
+        for task in asyncio.all_tasks() - {asyncio.current_task()}:
+            task.cancel()
+
+    asyncio.run(scenario())

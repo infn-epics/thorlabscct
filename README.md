@@ -47,7 +47,7 @@ DLLs and any `runtimes` subdirectory; do not use the `net48` build.
 The public, SDK-free image is published for every `v*` tag:
 
 ```sh
-docker pull ghcr.io/infn-epics/thorlabscct:0.2.4
+docker pull ghcr.io/infn-epics/thorlabscct:0.2.5
 ```
 
 It is the image used in production as well. The SDK is supplied at runtime:
@@ -166,7 +166,7 @@ launcher starts it from the ioc-chart config. The beamline repository needs no
    ```yaml
    iocDefaults:
      thorlabscct:
-       image: ghcr.io/infn-epics/thorlabscct:0.2.4
+       image: ghcr.io/infn-epics/thorlabscct:0.2.5
        sdk_path: /nfs/config/vendor/thorlabs-cct-sdk
    ```
 
@@ -232,6 +232,8 @@ enabled with `--virtual`.
 | `TriggerTimeout` | RW | max wait for an input trigger in s; 0 = forever |
 | `TriggerArmed` | RO | `Idle` / `Waiting for trigger` |
 | `Triggered` | RO | whether the last spectrum was started by the input trigger |
+| `MemoryUsed` | RO | memory of the IOC's container (cgroup), MiB |
+| `ManagedHeap` | RO | the .NET runtime's managed heap, MiB |
 | `Wavelength` | RO | wavelength axis in nm (waveform) |
 | `Spectrum` | RO | intensity in counts (waveform) |
 | `NumPixels` | RO | valid elements in both waveforms |
@@ -246,6 +248,18 @@ arrays keep CA clients such as Phoebus able to decode them. A Phoebus screen
 is in epik8s-opi: `thorlabscct-opi/thorlabscct.bob` (macros `P`, `R`).
 Acquisition and dark capture are serialized. Driver operations run outside the
 Channel Access event loop, so even a 30-second exposure does not freeze the IOC.
+
+### Connection and memory
+
+The IOC retries the connection every 10 s while the spectrometer is not
+connected (after a failed start, or after 5 failed acquisitions in a row) and
+restores the current PV settings, trigger mode included. A restart of the pod
+starts from `values.yaml`: put `trigger_mode: hardware` there to keep it.
+
+The Thorlabs Ethernet driver allocates large .NET buffers for every spectrum,
+which .NET reclaims late. The image caps the .NET heap at half the container
+(`DOTNET_GCHeapHardLimitPercent`) and the IOC forces a compacting collection
+every 30 s; `MemoryUsed` shows the result. Give the pod at least 384 MiB.
 
 ### Hardware trigger
 

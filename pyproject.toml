@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "thorlabscct10-ioc"
-version = "0.2.4"
+version = "0.2.5"
 description = "EPICS Channel Access IOC for Thorlabs CCT compact spectrometers"
 readme = "README.md"
 requires-python = ">=3.10"

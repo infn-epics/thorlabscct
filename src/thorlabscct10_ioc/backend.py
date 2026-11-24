@@ -212,6 +212,8 @@ class ThorlabsCCT:
         self._token = None
         self._shutter_open = True
         self._cts_type = None
+        self._gc = None
+        self._last_collect = 0.0
         self._acquire_cts = None
         self._aborted = False
         self._cts_lock = threading.Lock()
@@ -245,6 +247,9 @@ class ThorlabsCCT:
             self._helper.RegisterEthernetIpAddress(resolve_ipv4(self.ip_address))
         self._helper.WithVirtual = self.virtual
         self._cts_type = CancellationTokenSource
+        from System import GC  # type: ignore
+        from System.Runtime import GCLargeObjectHeapCompactionMode, GCSettings  # type: ignore
+        self._gc = (GC, GCSettings, GCLargeObjectHeapCompactionMode)
         self._token = CancellationTokenSource().Token
         known = [str(key) for key in self._helper.GetKnownDevicesAsync(self._token).Result]
         if not known:
@@ -339,6 +344,30 @@ class ThorlabsCCT:
             with self._cts_lock:
                 self._acquire_cts = None
             cts.Dispose()
+            self._collect_if_due()
+
+    # The Ethernet driver allocates large buffers per spectrum (.NET large-object heap). .NET reclaims them
+    # only in a full collection, which it postpones until its heap nears its own limit (75 % of the container
+    # by default), leaving no room for Python: the pod was OOM-killed every ~1-2 h at 1 Hz. A compacting
+    # full collection every COLLECT_PERIOD seconds keeps the process flat.
+    COLLECT_PERIOD = 30.0
+
+    def _collect_if_due(self) -> None:
+        if self._gc is None or time.monotonic() - self._last_collect < self.COLLECT_PERIOD:
+            return
+        self._last_collect = time.monotonic()
+        gc, settings, mode = self._gc
+        try:
+            settings.LargeObjectHeapCompactionMode = mode.CompactOnce
+            gc.Collect()
+        except Exception:  # never let housekeeping fail an acquisition
+            log.debug("forced .NET collection failed", exc_info=True)
+
+    def managed_heap_mib(self) -> float:
+        """The .NET managed heap in MiB (without forcing a collection)."""
+        if self._gc is None:
+            return 0.0
+        return float(self._gc[0].GetTotalMemory(False)) / 2**20
 
     def abort(self) -> None:
         """Cancel a pending acquisition (e.g. one waiting for a trigger); safe from any thread."""

@@ -28,6 +28,28 @@ def padded(values: np.ndarray, length: int = MAX_PIXELS) -> np.ndarray:
     return out
 
 
+def _memory_used_mib() -> float | None:
+    """The container's memory (cgroup v2/v1), else the process' resident set, in MiB."""
+    for path in ("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory/memory.usage_in_bytes"):
+        try:
+            with open(path) as f:
+                return int(f.read().strip()) / 2**20
+        except (OSError, ValueError):
+            pass
+    try:
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 2**20
+    except (OSError, ValueError, IndexError):
+        pass
+    try:  # neither (macOS): the peak resident size
+        import resource
+        import sys
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return peak / 2**20 if sys.platform == "darwin" else peak / 1024
+    except Exception:
+        return None
+
+
 def enum_index(prop, value) -> int:
     """Index of an enum PV value.
 
@@ -92,6 +114,12 @@ class CCTIOC(PVGroup):
     triggered = pvproperty(value=0, dtype=ChannelType.ENUM, enum_strings=("No", "Yes"), read_only=True,
                            name="Triggered")
 
+    # health: memory of the IOC's container (or process) and of the .NET runtime inside it
+    memory_used = pvproperty(value=0.0, dtype=float, read_only=True, name="MemoryUsed", units="MiB",
+                             precision=1)
+    managed_heap = pvproperty(value=0.0, dtype=float, read_only=True, name="ManagedHeap", units="MiB",
+                              precision=1)
+
     wavelength = pvproperty(value=np.zeros(MAX_PIXELS), dtype=float, max_length=MAX_PIXELS,
                             read_only=True, name="Wavelength", units="nm", precision=4)
     spectrum = pvproperty(value=np.zeros(MAX_PIXELS), dtype=float, max_length=MAX_PIXELS,
@@ -134,6 +162,7 @@ class CCTIOC(PVGroup):
         self._acquire_event: asyncio.Event | None = None
         self._dark_event: asyncio.Event | None = None
         self._last_logged_error: str | None = None
+        self._failures = 0          # consecutive failed acquisitions
         super().__init__(*args, **kwargs)
 
     @connected.startup
@@ -153,22 +182,59 @@ class CCTIOC(PVGroup):
         await self.trigger_slope.write(value=int(falling), verify_value=False)
         await self.trigger_out_delay.write(value=self.initial_trigger_out_delay, verify_value=False)
         await self.trigger_timeout.write(value=self.initial_trigger_timeout, verify_value=False)
+        await self._connect()
+        asyncio.create_task(self._worker())
+        asyncio.create_task(self._continuous_worker())
+        asyncio.create_task(self._supervisor())
+
+    async def _connect(self) -> bool:
+        """Connect and apply the current PV settings (exposure, average, shutter, trigger)."""
         try:
             await asyncio.to_thread(self.backend.connect)
             await asyncio.to_thread(self.backend.set_exposure, float(self.exposure.value))
             await asyncio.to_thread(self.backend.set_average, int(self.average.value))
             await asyncio.to_thread(self.backend.set_shutter, self._enum(self.shutter) == 1)
-            await instance.write(value=1)
+            await self.connected.write(value=1)
             await self.device_id.write(value=str(self.backend.device_id)[:MAX_STRING])
             log.info("connected to %s", self.backend.device_id)
+            self._failures = 0
             await self._clear_error()
         except Exception as exc:
             await self._record_error(exc, "CCT connection failed")
             await asyncio.to_thread(self.backend.close)
-        else:
-            await self._apply_trigger_config()
-        asyncio.create_task(self._worker())
-        asyncio.create_task(self._continuous_worker())
+            return False
+        await self._apply_trigger_config()
+        return True
+
+    RECONNECT_PERIOD = 10.0     # s between connection attempts while disconnected
+    MAX_FAILURES = 5            # consecutive failed acquisitions that mean the device is gone
+
+    async def _supervisor(self):
+        """Publish memory use; reconnect a lost device (the device may refuse a new session for a while
+        after the previous process was killed, and it may drop the connection)."""
+        while True:
+            await asyncio.sleep(self.RECONNECT_PERIOD)
+            await self._publish_memory()
+            if self._enum(self.connected) == 1 and self._failures < self.MAX_FAILURES:
+                continue
+            if self._enum(self.connected) == 1:
+                log.warning("%d acquisitions failed in a row: reconnecting", self._failures)
+                await self.connected.write(value=0)
+            assert self._lock is not None
+            async with self._lock:
+                await asyncio.to_thread(self.backend.close)
+                await self._connect()
+
+    async def _publish_memory(self):
+        used = _memory_used_mib()
+        if used is not None:
+            await self.memory_used.write(value=used)
+        heap = getattr(self.backend, "managed_heap_mib", None)
+        if heap is not None:
+            try:
+                await self.managed_heap.write(value=float(await asyncio.to_thread(heap)))
+            except Exception:
+                pass
 
     @exposure.putter
     async def exposure(self, instance, value):
@@ -347,6 +413,7 @@ class CCTIOC(PVGroup):
                     await self.peak_wavelength.write(value=float(wavelength[peak]))
                     await self.peak_intensity.write(value=float(intensity[peak]))
                 await self.triggered.write(value=int(bool(result.triggered)))
+                self._failures = 0
                 await self._clear_error()
             except AcquisitionAborted:
                 log.info("acquisition aborted")
@@ -357,6 +424,7 @@ class CCTIOC(PVGroup):
                 else:
                     await self._record_error(exc, "triggered acquisition")
             except Exception as exc:
+                self._failures += 1
                 await self._record_error(exc, "spectrum acquisition failed")
             finally:
                 if hardware:

@@ -15,7 +15,11 @@ ENV VIRTUAL_ENV=/opt/venv \
     PYTHONNET_RUNTIME=coreclr \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    SDK_PATH=/opt/thorlabs/cct
+    SDK_PATH=/opt/thorlabs/cct \
+    # .NET would size its heap at 75 % of the container and leave Python no room (OOM kills): cap it at
+    # 50 % (hex) and collect more eagerly; the IOC also forces a compacting collection every 30 s.
+    DOTNET_GCHeapHardLimitPercent=0x32 \
+    DOTNET_GCConserveMemory=5
 
 RUN python3 -m venv "$VIRTUAL_ENV" \
     && pip install --no-cache-dir --upgrade pip setuptools wheel
