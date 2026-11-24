@@ -47,7 +47,7 @@ DLLs and any `runtimes` subdirectory; do not use the `net48` build.
 The public, SDK-free image is published for every `v*` tag:
 
 ```sh
-docker pull ghcr.io/infn-epics/thorlabscct:0.2.7
+docker pull ghcr.io/infn-epics/thorlabscct:0.2.8
 ```
 
 It is the image used in production as well. The SDK is supplied at runtime:
@@ -166,7 +166,7 @@ launcher starts it from the ioc-chart config. The beamline repository needs no
    ```yaml
    iocDefaults:
      thorlabscct:
-       image: ghcr.io/infn-epics/thorlabscct:0.2.7
+       image: ghcr.io/infn-epics/thorlabscct:0.2.8
        sdk_path: /nfs/config/vendor/thorlabs-cct-sdk
    ```
 
@@ -268,6 +268,16 @@ The Thorlabs Ethernet driver allocates large .NET buffers for every spectrum,
 which .NET reclaims late. The image caps the .NET heap at half the container
 (`DOTNET_GCHeapHardLimitPercent`) and the IOC forces a compacting collection
 every 30 s; `MemoryUsed` shows the result. Give the pod at least 384 MiB.
+
+### Slow clients
+
+caproto queues monitor updates for a client that reads slower than the IOC
+publishes (the CA gateway, a screen over a slow link). Its defaults allow 1000
+updates per subscription and 10000 per connection, far more than the pod's
+memory with 32 KB spectra. The package sets `CAPROTO_MAX_SUBSCRIPTION_BACKLOG=10`
+and `CAPROTO_MAX_TOTAL_SUBSCRIPTION_BACKLOG=200` unless the environment does:
+a slow client gets the latest spectra and older ones are dropped. `Wavelength`
+is published only when it changes.
 
 ### Hardware trigger
 

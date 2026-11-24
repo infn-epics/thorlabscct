@@ -188,6 +188,7 @@ class CCTIOC(PVGroup):
         self._last_logged_error: str | None = None
         self._failures = 0          # consecutive failed acquisitions
         self._last_tick: int | None = None
+        self._wavelength: np.ndarray | None = None   # last published axis
         self._intervals: list[float] = []   # the last FRAME_WINDOW intervals, ms
         super().__init__(*args, **kwargs)
 
@@ -490,7 +491,10 @@ class CCTIOC(PVGroup):
                 peak = int(np.argmax(intensity)) if count else 0
                 # publish full-length arrays (NaN after NumPixels): Phoebus/CAJ
                 # fails to decode arrays shorter than the declared length
-                await self.wavelength.write(value=padded(wavelength))
+                # the wavelength axis is the device calibration: publish it only when it changes
+                if self._wavelength is None or not np.array_equal(self._wavelength, wavelength):
+                    await self.wavelength.write(value=padded(wavelength))
+                    self._wavelength = wavelength.copy()
                 await self.spectrum.write(value=padded(intensity))
                 await self.num_pixels.write(value=count)
                 await self.sequence.write(value=int(self.sequence.value) + 1)

@@ -308,3 +308,41 @@ def test_reconnect_and_hardware_reset(monkeypatch):
             task.cancel()
 
     asyncio.run(scenario())
+
+
+def test_caproto_backlog_is_bounded_before_caproto_loads():
+    import subprocess
+    import sys
+
+    code = ("import os; [os.environ.pop(k, None) for k in ('CAPROTO_MAX_SUBSCRIPTION_BACKLOG', "
+            "'CAPROTO_MAX_TOTAL_SUBSCRIPTION_BACKLOG')]; import thorlabscct10_ioc.ioc; import caproto as ca; "
+            "print(ca.MAX_SUBSCRIPTION_BACKLOG, ca.MAX_TOTAL_SUBSCRIPTION_BACKLOG)")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.split()
+    assert out == ["10", "200"]
+
+
+def test_wavelength_is_published_only_when_it_changes():
+    import asyncio
+
+    from thorlabscct10_ioc.ioc import CCTIOC
+
+    async def scenario():
+        ioc = CCTIOC(prefix="T:", backend=SimulatedCCT())
+        ioc._lock = asyncio.Lock()
+        ioc.backend.connect()
+        writes = []
+        original = ioc.wavelength.write
+
+        async def counting(*args, **kwargs):
+            writes.append(1)
+            return await original(*args, **kwargs)
+        ioc.wavelength.write = counting
+        for _ in range(5):
+            await ioc._do_acquire()
+        assert ioc.sequence.value == 5 and len(writes) == 1
+        ioc.backend.pixels = 1024                  # a different axis is published again
+        ioc.backend._dark = np.zeros(1024)
+        await ioc._do_acquire()
+        assert len(writes) == 2
+
+    asyncio.run(scenario())
