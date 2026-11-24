@@ -260,3 +260,22 @@ def test_supervisor_reconnects_and_restores_settings(monkeypatch):
             task.cancel()
 
     asyncio.run(scenario())
+
+
+def test_frame_timing_from_the_device_clock():
+    import asyncio
+
+    from thorlabscct10_ioc.ioc import CCTIOC
+
+    async def scenario():
+        ioc = CCTIOC(prefix="T:", backend=SimulatedCCT())
+        for tick in (1_000_000, 1_100_000, 1_150_000, 2_150_000):   # 100, 50 and 1000 ms apart
+            await ioc._publish_frame_timing(tick)
+        return ioc
+
+    ioc = asyncio.run(scenario())
+    assert ioc.device_time.value == 2.15
+    assert ioc.frame_interval.value == 1000.0
+    assert (ioc.frame_interval_min.value, ioc.frame_interval_max.value) == (50.0, 1000.0)
+    ioc._reset_frame_timing()
+    assert ioc._last_tick is None and ioc._intervals == []

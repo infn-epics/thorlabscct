@@ -24,6 +24,7 @@ class Spectrum:
     wavelength: np.ndarray
     intensity: np.ndarray
     triggered: bool = False   # acquisition started by the input hardware trigger
+    device_tick_us: int | None = None   # the spectrometer CPU's microsecond tick at acquisition
 
 
 class TriggerTimeout(TimeoutError):
@@ -181,7 +182,8 @@ class SimulatedCCT:
             )
         intensity = np.clip(120.0 + signal + noise - self._dark, 0.0, 65535.0)
         time.sleep(min(self.exposure_ms * self.average / 1000.0, 0.05))
-        return Spectrum(wavelength, intensity, triggered=self.trigger_enabled)
+        return Spectrum(wavelength, intensity, triggered=self.trigger_enabled,
+                        device_tick_us=int(time.monotonic() * 1e6))
 
     def _require_connected(self) -> None:
         if not self.connected:
@@ -339,7 +341,9 @@ class ThorlabsCCT:
             if wavelength.size != intensity.size or wavelength.size == 0:
                 raise RuntimeError("CCT driver returned invalid spectrum arrays")
             triggered = bool(getattr(result, "InputHardwareTrigger", False))
-            return Spectrum(wavelength, intensity, triggered=triggered)
+            tick = getattr(result, "Tick", None)
+            return Spectrum(wavelength, intensity, triggered=triggered,
+                            device_tick_us=int(tick) if tick is not None else None)
         finally:
             with self._cts_lock:
                 self._acquire_cts = None

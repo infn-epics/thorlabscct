@@ -47,7 +47,7 @@ DLLs and any `runtimes` subdirectory; do not use the `net48` build.
 The public, SDK-free image is published for every `v*` tag:
 
 ```sh
-docker pull ghcr.io/infn-epics/thorlabscct:0.2.5
+docker pull ghcr.io/infn-epics/thorlabscct:0.2.6
 ```
 
 It is the image used in production as well. The SDK is supplied at runtime:
@@ -166,7 +166,7 @@ launcher starts it from the ioc-chart config. The beamline repository needs no
    ```yaml
    iocDefaults:
      thorlabscct:
-       image: ghcr.io/infn-epics/thorlabscct:0.2.5
+       image: ghcr.io/infn-epics/thorlabscct:0.2.6
        sdk_path: /nfs/config/vendor/thorlabs-cct-sdk
    ```
 
@@ -232,6 +232,9 @@ enabled with `--virtual`.
 | `TriggerTimeout` | RW | max wait for an input trigger in s; 0 = forever |
 | `TriggerArmed` | RO | `Idle` / `Waiting for trigger` |
 | `Triggered` | RO | whether the last spectrum was started by the input trigger |
+| `DeviceTime` | RO | the spectrometer's own clock at the last frame (SDK `Tick`), s |
+| `FrameInterval` | RO | time between the last two frames on the spectrometer's clock, ms |
+| `FrameIntervalMin`, `FrameIntervalMax` | RO | range of `FrameInterval` over the last 50 frames (restarts on a mode change or reconnect) |
 | `MemoryUsed` | RO | memory of the IOC's container (cgroup), MiB |
 | `ManagedHeap` | RO | the .NET runtime's managed heap, MiB |
 | `Wavelength` | RO | wavelength axis in nm (waveform) |

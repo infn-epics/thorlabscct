@@ -117,6 +117,14 @@ class CCTIOC(PVGroup):
     # health: memory of the IOC's container (or process) and of the .NET runtime inside it
     memory_used = pvproperty(value=0.0, dtype=float, read_only=True, name="MemoryUsed", units="MiB",
                              precision=1)
+    # frame timing on the spectrometer's own clock (SDK Tick): shows the real edge pattern at the trigger input
+    device_time = pvproperty(value=0.0, dtype=float, read_only=True, name="DeviceTime", units="s", precision=6)
+    frame_interval = pvproperty(value=0.0, dtype=float, read_only=True, name="FrameInterval", units="ms",
+                                precision=1)
+    frame_interval_min = pvproperty(value=0.0, dtype=float, read_only=True, name="FrameIntervalMin", units="ms",
+                                    precision=1)
+    frame_interval_max = pvproperty(value=0.0, dtype=float, read_only=True, name="FrameIntervalMax", units="ms",
+                                    precision=1)
     managed_heap = pvproperty(value=0.0, dtype=float, read_only=True, name="ManagedHeap", units="MiB",
                               precision=1)
 
@@ -163,6 +171,8 @@ class CCTIOC(PVGroup):
         self._dark_event: asyncio.Event | None = None
         self._last_logged_error: str | None = None
         self._failures = 0          # consecutive failed acquisitions
+        self._last_tick: int | None = None
+        self._intervals: list[float] = []   # the last FRAME_WINDOW intervals, ms
         super().__init__(*args, **kwargs)
 
     @connected.startup
@@ -198,6 +208,7 @@ class CCTIOC(PVGroup):
             await self.device_id.write(value=str(self.backend.device_id)[:MAX_STRING])
             log.info("connected to %s", self.backend.device_id)
             self._failures = 0
+            self._reset_frame_timing()
             await self._clear_error()
         except Exception as exc:
             await self._record_error(exc, "CCT connection failed")
@@ -224,6 +235,22 @@ class CCTIOC(PVGroup):
             async with self._lock:
                 await asyncio.to_thread(self.backend.close)
                 await self._connect()
+
+    FRAME_WINDOW = 50
+
+    async def _publish_frame_timing(self, tick: int | None):
+        """Device-clock time of this frame and the interval to the previous one (only consecutive frames
+        of an uninterrupted series are compared: a mode change or reconnect restarts the series)."""
+        if tick is None:
+            return
+        await self.device_time.write(value=tick / 1e6)
+        if self._last_tick is not None and tick > self._last_tick:
+            interval = (tick - self._last_tick) / 1000.0
+            self._intervals = (self._intervals + [interval])[-self.FRAME_WINDOW:]
+            await self.frame_interval.write(value=interval)
+            await self.frame_interval_min.write(value=min(self._intervals))
+            await self.frame_interval_max.write(value=max(self._intervals))
+        self._last_tick = tick
 
     async def _publish_memory(self):
         used = _memory_used_mib()
@@ -279,7 +306,11 @@ class CCTIOC(PVGroup):
     async def trigger_mode(self, instance, value):
         await self._call_backend(self.backend.set_input_trigger,
                                  *self._trigger_settings(mode=enum_index(instance, value)))
+        self._reset_frame_timing()
         return value
+
+    def _reset_frame_timing(self):
+        self._last_tick, self._intervals = None, []
 
     @trigger_averaging.putter
     async def trigger_averaging(self, instance, value):
@@ -413,6 +444,7 @@ class CCTIOC(PVGroup):
                     await self.peak_wavelength.write(value=float(wavelength[peak]))
                     await self.peak_intensity.write(value=float(intensity[peak]))
                 await self.triggered.write(value=int(bool(result.triggered)))
+                await self._publish_frame_timing(result.device_tick_us)
                 self._failures = 0
                 await self._clear_error()
             except AcquisitionAborted:
