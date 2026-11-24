@@ -3,7 +3,7 @@ name: thorlabscct
 description: Thorlabs CCT10/CCT11/CCT12 compact CMOS spectrometers (caproto, Thorlabs .NET SDK)
 devgroup: diag
 image: ghcr.io/infn-epics/thorlabscct    # public, without the Thorlabs SDK
-version: 0.2.6
+version: 0.2.7
 docs: https://github.com/infn-epics/thorlabscct
 entrypoint: thorlabscct10_ioc.ioc:run_pyioc
 protocols: [ca]

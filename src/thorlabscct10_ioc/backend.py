@@ -68,6 +68,7 @@ class CCTBackend(Protocol):
     def set_output_trigger_delay(self, milliseconds: float) -> None: ...
     def acquire(self, timeout: float | None = None) -> Spectrum: ...
     def abort(self) -> None: ...
+    def soft_reset(self) -> None: ...
 
 
 class SimulatedCCT:
@@ -108,6 +109,12 @@ class SimulatedCCT:
         self._stop.set()
         self.abort()
         self._generator = None
+
+    def soft_reset(self) -> None:
+        """Emulate the hardware reset: the device is left disconnected."""
+        self._require_connected()
+        self.resets = getattr(self, "resets", 0) + 1
+        self.close()
 
     def _pulse_generator(self) -> None:
         while not self._stop.wait(1.0 / self.trigger_rate):
@@ -270,9 +277,23 @@ class ThorlabsCCT:
         self._device = self._helper.GetCompactSpectrographById(self.device_id)
 
     def close(self) -> None:
+        """Release the device session (so another process, e.g. the next pod, can connect) and the SDK."""
         if self._helper is not None:
+            if self.device_id:
+                try:
+                    self._helper.SetSpectrometerDisconnectedByIdAsync(self.device_id, False).Result
+                except Exception:
+                    log.debug("releasing the device session failed", exc_info=True)
             self._helper.Dispose()
         self._helper = self._device = self._token = None
+
+    def soft_reset(self) -> None:
+        """Software reset of the spectrometer hardware (SDK SoftResetAsync). The device is left
+        disconnected: the caller reconnects by discovery."""
+        try:
+            self._check(self._spectrometer.SoftResetAsync(False, self._token).Result, "reset the spectrometer")
+        finally:
+            self.close()
 
     def set_exposure(self, milliseconds: float) -> None:
         self._check(self._spectrometer.SetManualExposureAsync(float(milliseconds), self._token).Result,

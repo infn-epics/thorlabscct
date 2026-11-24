@@ -279,3 +279,32 @@ def test_frame_timing_from_the_device_clock():
     assert (ioc.frame_interval_min.value, ioc.frame_interval_max.value) == (50.0, 1000.0)
     ioc._reset_frame_timing()
     assert ioc._last_tick is None and ioc._intervals == []
+
+
+def test_reconnect_and_hardware_reset(monkeypatch):
+    import asyncio
+
+    from thorlabscct10_ioc.ioc import CCTIOC
+
+    monkeypatch.setattr(CCTIOC, "RECONNECT_PERIOD", 0.05)
+
+    async def scenario():
+        backend = SimulatedCCT()
+        ioc = CCTIOC(prefix="T:", backend=backend)
+        await CCTIOC.connected.pvspec.startup(ioc, ioc.connected, None)
+        await ioc.trigger_mode.write(value=1, verify_value=False)
+        await ioc.reconnect.write("Reconnect")                  # by name, as clients write it
+        assert ioc.connected.value in (0, "Disconnected")
+        await asyncio.sleep(0.3)
+        assert ioc.connected.value in (1, "Connected") and backend.trigger_enabled   # settings restored
+        await ioc.reset_device.write("Reset")
+        assert backend.resets == 1 and ioc.connected.value in (0, "Disconnected")
+        assert "reset" in ioc.last_error.value
+        await asyncio.sleep(0.3)
+        assert ioc.connected.value in (1, "Connected") and ioc.last_error.value == ""
+        await ioc.reset_device.write("Idle")                    # Idle does nothing
+        assert backend.resets == 1
+        for task in asyncio.all_tasks() - {asyncio.current_task()}:
+            task.cancel()
+
+    asyncio.run(scenario())

@@ -47,7 +47,7 @@ DLLs and any `runtimes` subdirectory; do not use the `net48` build.
 The public, SDK-free image is published for every `v*` tag:
 
 ```sh
-docker pull ghcr.io/infn-epics/thorlabscct:0.2.6
+docker pull ghcr.io/infn-epics/thorlabscct:0.2.7
 ```
 
 It is the image used in production as well. The SDK is supplied at runtime:
@@ -166,7 +166,7 @@ launcher starts it from the ioc-chart config. The beamline repository needs no
    ```yaml
    iocDefaults:
      thorlabscct:
-       image: ghcr.io/infn-epics/thorlabscct:0.2.6
+       image: ghcr.io/infn-epics/thorlabscct:0.2.7
        sdk_path: /nfs/config/vendor/thorlabs-cct-sdk
    ```
 
@@ -224,6 +224,8 @@ enabled with `--virtual`.
 | `Continuous` | RW | periodic acquisition enable |
 | `Period` | RW | continuous request period in seconds |
 | `Busy` | RO | acquisition in progress |
+| `Reconnect` | WO-like | write `Reconnect` to close the connection; the IOC reconnects within 10 s with the current settings |
+| `ResetDevice` | WO-like | write `Reset` for a software reset of the spectrometer hardware (SDK `SoftResetAsync`); the IOC reconnects when it is back |
 | `Abort` | WO-like | write `Abort` to cancel a pending acquisition (e.g. waiting for a trigger) |
 | `TriggerMode` | RW | `Free running` / `Hardware` (each spectrum waits for a TTL edge on the trigger input) |
 | `TriggerSlope` | RW | `Rising` / `Falling` edge |
@@ -256,7 +258,10 @@ Channel Access event loop, so even a 30-second exposure does not freeze the IOC.
 
 The IOC retries the connection every 10 s while the spectrometer is not
 connected (after a failed start, or after 5 failed acquisitions in a row) and
-restores the current PV settings, trigger mode included. A restart of the pod
+restores the current PV settings, trigger mode included. `Reconnect` does the
+same on request, and `ResetDevice` resets the spectrometer first. On SIGTERM
+(pod stop) the IOC releases the device session, so the next pod can connect
+at once. A restart of the pod
 starts from `values.yaml`: put `trigger_mode: hardware` there to keep it.
 
 The Thorlabs Ethernet driver allocates large .NET buffers for every spectrum,

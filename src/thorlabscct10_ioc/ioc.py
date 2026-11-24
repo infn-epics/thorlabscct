@@ -28,6 +28,19 @@ def padded(values: np.ndarray, length: int = MAX_PIXELS) -> np.ndarray:
     return out
 
 
+# The SIGTERM handler serve() installs. The .NET runtime installs its own when the SDK loads (at the first
+# connection), which would end the process without releasing the device session: _connect() puts it back.
+_SIGTERM_HANDLER = None
+
+
+def _reinstall_sigterm() -> None:
+    import signal
+    import threading
+
+    if _SIGTERM_HANDLER is not None and threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, _SIGTERM_HANDLER)
+
+
 def _memory_used_mib() -> float | None:
     """The container's memory (cgroup v2/v1), else the process' resident set, in MiB."""
     for path in ("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory/memory.usage_in_bytes"):
@@ -97,6 +110,9 @@ class CCTIOC(PVGroup):
     busy = pvproperty(value=0, dtype=ChannelType.ENUM, enum_strings=("Idle", "Acquiring"),
                       read_only=True, name="Busy")
     abort = pvproperty(value=0, dtype=ChannelType.ENUM, enum_strings=("Idle", "Abort"), name="Abort")
+    # connection recovery: drop and re-open the session, or reset the spectrometer hardware itself
+    reconnect = pvproperty(value=0, dtype=ChannelType.ENUM, enum_strings=("Idle", "Reconnect"), name="Reconnect")
+    reset_device = pvproperty(value=0, dtype=ChannelType.ENUM, enum_strings=("Idle", "Reset"), name="ResetDevice")
 
     # input hardware trigger (TTL in) and output trigger (TTL out at acquisition start)
     trigger_mode = pvproperty(value=0, dtype=ChannelType.ENUM, enum_strings=("Free running", "Hardware"),
@@ -207,6 +223,7 @@ class CCTIOC(PVGroup):
             await self.connected.write(value=1)
             await self.device_id.write(value=str(self.backend.device_id)[:MAX_STRING])
             log.info("connected to %s", self.backend.device_id)
+            _reinstall_sigterm()
             self._failures = 0
             self._reset_frame_timing()
             await self._clear_error()
@@ -301,6 +318,44 @@ class CCTIOC(PVGroup):
                 self._acquire_event.clear()
             await asyncio.to_thread(self.backend.abort)
         return 0
+
+    @reconnect.putter
+    async def reconnect(self, instance, value):
+        if enum_index(instance, value) == 1:
+            await self._drop_connection("reconnect requested")
+        return 0
+
+    @reset_device.putter
+    async def reset_device(self, instance, value):
+        """Software reset of the spectrometer; the supervisor reconnects once it is back."""
+        if enum_index(instance, value) != 1:
+            return 0
+        if self._enum(self.connected) != 1:
+            raise RuntimeError("spectrometer is not connected: use Reconnect")
+        await asyncio.to_thread(self.backend.abort)
+        assert self._lock is not None
+        async with self._lock:
+            log.warning("hardware reset requested")
+            try:
+                await asyncio.to_thread(self.backend.soft_reset)
+            except Exception as exc:
+                await self._record_error(exc, "hardware reset failed")
+                raise
+            finally:
+                await self.connected.write(value=0)
+                await self.device_id.write(value="")
+        await self._record_error(RuntimeError("hardware reset: reconnecting"))
+        return 0
+
+    async def _drop_connection(self, reason: str):
+        """Close the session now; the supervisor reconnects within RECONNECT_PERIOD."""
+        await asyncio.to_thread(self.backend.abort)
+        assert self._lock is not None
+        async with self._lock:
+            log.info("%s: closing the connection", reason)
+            await asyncio.to_thread(self.backend.close)
+            await self.connected.write(value=0)
+            await self.device_id.write(value="")
 
     @trigger_mode.putter
     async def trigger_mode(self, instance, value):
@@ -660,11 +715,21 @@ def serve(config: IOCConfig, list_pvs: bool = False) -> None:
     if list_pvs:
         print("\n".join(sorted(pvdb)))
         return
+    # The pod is stopped with SIGTERM: leave through the finally below, so each device's session is
+    # released and the next process can connect at once.
+    import signal
+
+    def _stop(signum, frame):
+        raise KeyboardInterrupt
+    global _SIGTERM_HANDLER
+    _SIGTERM_HANDLER = _stop
+    signal.signal(signal.SIGTERM, _stop)
     try:
         run(pvdb, interfaces=config.interfaces, log_pv_names=config.log_pv_names)
     finally:
         for backend in backends:
             backend.close()
+        log.info("device sessions released")
 
 
 def main(argv: list[str] | None = None) -> None:

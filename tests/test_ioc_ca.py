@@ -108,3 +108,16 @@ def test_hardware_trigger_timeout_abort_and_settings_while_armed(ioc):
     put("Acquire", "Acquire")
     assert _wait(lambda: get("Sequence") == seq + 1)
     assert get("Triggered") == b"No"
+
+
+def test_sigterm_releases_the_device_and_exits(tmp_path):
+    import signal
+
+    proc = subprocess.Popen([sys.executable, "-m", "thorlabscct10_ioc.ioc", "--simulate", "--prefix", "TERM:",
+                             "--interfaces", "127.0.0.1"],
+                            env=dict(os.environ, EPICS_CA_SERVER_PORT=str(_free_port())),
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    time.sleep(3)
+    proc.send_signal(signal.SIGTERM)
+    out, _ = proc.communicate(timeout=10)
+    assert "device sessions released" in out
